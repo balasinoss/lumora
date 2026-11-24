@@ -3,6 +3,7 @@ import CoreGraphics
 
 enum MaskKind: String, Codable, CaseIterable {
     case subject, sky, background, people, person, brush, linear, radial
+    case object, faceSkin, eyes, lips, teeth
 
     var title: String {
         switch self {
@@ -14,6 +15,11 @@ enum MaskKind: String, Codable, CaseIterable {
         case .brush: return "Brush"
         case .linear: return "Linear Gradient"
         case .radial: return "Radial Gradient"
+        case .object: return "Object"
+        case .faceSkin: return "Face Skin"
+        case .eyes: return "Eyes"
+        case .lips: return "Lips"
+        case .teeth: return "Teeth"
         }
     }
     var icon: String {
@@ -25,9 +31,14 @@ enum MaskKind: String, Codable, CaseIterable {
         case .brush: return "paintbrush.pointed"
         case .linear: return "square.bottomhalf.filled"
         case .radial: return "circle.dashed"
+        case .object: return "rectangle.dashed"
+        case .faceSkin: return "face.smiling"
+        case .eyes: return "eye"
+        case .lips: return "mouth"
+        case .teeth: return "mouth.fill"
         }
     }
-    var isAI: Bool { [.subject, .sky, .background, .people, .person].contains(self) }
+    var isAI: Bool { [.subject, .sky, .background, .people, .person, .faceSkin, .eyes, .lips, .teeth].contains(self) }
 }
 
 struct NPoint: Codable, Equatable, Hashable {
@@ -86,6 +97,7 @@ struct MaskLayer: Codable, Equatable, Identifiable {
     var visible = true
     var linear: MaskLinearGradient? = nil
     var radial: MaskRadialGradient? = nil
+    var objectRect: NormRect? = nil
     /// Brush strokes refine any mask (add or erase). A Brush mask is made only of strokes.
     var strokes: [BrushStroke] = []
     var adjust = LocalAdjust()

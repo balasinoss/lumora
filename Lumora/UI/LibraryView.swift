@@ -15,6 +15,15 @@ struct LibraryView: View {
     @State private var selecting = false
     @State private var selection: Set<UUID> = []
     @State private var columns = 3
+    @State private var selectionOrder: [UUID] = []
+    @State private var showReview = false
+    @State private var showBursts = false
+    @State private var presetTargets: [PhotoItem]?
+    @State private var status: String?
+    @State private var galleryURL: URL?
+    @State private var askGalleryName = false
+    @State private var galleryName = ""
+    @ObservedObject private var expiry = ExpiryWatcher.shared
 
     var gridCols: [GridItem] { Array(repeating: GridItem(.flexible(), spacing: 2), count: columns) }
 
@@ -32,7 +41,8 @@ struct LibraryView: View {
         case "flagged": list = library.items.filter(\.flagged)
         case "rated": list = library.items.filter { $0.rating > 0 }
         case "unsorted": list = library.items.filter { $0.analysis == nil }
-        default: list = library.items.filter { smart.albums(for: $0).contains(album) }
+        case "rejected": list = library.items.filter(\.isRejected)
+        default: list = library.items.filter { smart.albums(for: $0).contains(album) && !$0.isRejected }
         }
         if sortBySharpness { list.sort { ($0.analysis?.sharpness ?? -1) > ($1.analysis?.sharpness ?? -1) } }
         return list
@@ -47,13 +57,23 @@ struct LibraryView: View {
                 } else {
                     ScrollView {
                         VStack(spacing: 12) {
+                            if let msg = expiry.message {
+                                HStack {
+                                    Image(systemName: "clock.badge.exclamationmark").foregroundStyle(Theme.accent)
+                                    Text(msg).font(.system(size: 12, weight: .semibold))
+                                    Spacer()
+                                }
+                                .padding(12).background(Theme.panel2, in: RoundedRectangle(cornerRadius: 12)).padding(.horizontal, 14)
+                            }
                             albumBar
                             LazyVGrid(columns: gridCols, spacing: 2) {
                                 ForEach(filtered) { item in
                                     Thumb(item: item, selected: selection.contains(item.id), selecting: selecting, showScore: sortBySharpness)
+                                        .opacity(item.isRejected && album != "rejected" ? 0.4 : 1)
                                         .onTapGesture {
                                             if selecting {
-                                                if selection.contains(item.id) { selection.remove(item.id) } else { selection.insert(item.id) }
+                                                if selection.contains(item.id) { selection.remove(item.id); selectionOrder.removeAll { $0 == item.id } }
+                                                else { selection.insert(item.id); selectionOrder.append(item.id) }
                                             } else { editing = item }
                                         }
                                         .contextMenu { menu(for: item) }
@@ -82,6 +102,11 @@ struct LibraryView: View {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     if selecting {
                         Menu {
+                            Button { presetTargets = selectedItems } label: { Label("Apply Preset…", systemImage: "square.stack.3d.up") }
+                            if selection.count > 1 {
+                                Button { matchSelection() } label: { Label("Match exposure & color to first selected", systemImage: "equal.circle") }
+                            }
+                            Button { askGalleryName = true } label: { Label("Share as Gallery…", systemImage: "rectangle.grid.2x2") }
                             if let c = library.clipboard, !selection.isEmpty {
                                 Button { for it in library.items where selection.contains(it.id) { library.paste(c, onto: it) }; endSelect() } label: {
                                     Label("Paste Settings", systemImage: "doc.on.clipboard") }
@@ -95,7 +120,13 @@ struct LibraryView: View {
                         } label: { Text("Actions") }.disabled(selection.isEmpty)
                         Button("Done") { endSelect() }.bold()
                     } else if !library.items.isEmpty {
+                        Button { showReview = true } label: { Image(systemName: "rectangle.stack.badge.play") }
                         Menu {
+                            Button { showBursts = true } label: { Label("Bursts — keep the best", systemImage: "square.stack.3d.forward.dottedline") }
+                            Button { selecting = true; selection = Set(filtered.map(\.id)); selectionOrder = filtered.map(\.id) } label: {
+                                Label("Select all in album", systemImage: "checkmark.circle.fill") }
+                            Button(role: .destructive) { for it in library.items where it.isRejected { library.delete(it) } } label: {
+                                Label("Delete rejected photos", systemImage: "trash") }
                             Toggle(isOn: $sortBySharpness) { Label("Sort by sharpness", systemImage: "scope") }
                             Button { selecting = true } label: { Label("Select", systemImage: "checkmark.circle") }
                             Button { smart.enqueue(library.items) } label: { Label("Analyze unsorted photos", systemImage: "sparkles") }
@@ -111,11 +142,46 @@ struct LibraryView: View {
                 if case .success(let urls) = result { library.importBatch(urls, securityScoped: true) }
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
+            .fullScreenCover(isPresented: $showReview) { CullView(ids: filtered.map(\.id)) }
+            .sheet(isPresented: $showBursts) { BurstsView() }
+            .sheet(isPresented: Binding(get: { presetTargets != nil }, set: { if !$0 { presetTargets = nil; endSelect() } })) {
+                if let t = presetTargets { ApplyPresetSheet(items: t) }
+            }
+            .sheet(item: $galleryURL) { url in ShareSheet(items: [url]) }
+            .alert("Gallery name", isPresented: $askGalleryName) {
+                TextField("e.g. Panathinaikos vs Olympiacos", text: $galleryName)
+                Button("Create") { buildGallery() }
+                Button("Cancel", role: .cancel) {}
+            } message: { Text("Creates a web gallery folder you can share (in iCloud Drive: long-press the folder in Files → Share → Copy Link).") }
             .fullScreenCover(item: $editing) { item in EditorView(item: item) }
         }
     }
 
-    func endSelect() { selecting = false; selection = [] }
+    func endSelect() { selecting = false; selection = []; selectionOrder = [] }
+
+    var selectedItems: [PhotoItem] {
+        selectionOrder.compactMap { id in library.items.first { $0.id == id } }
+    }
+
+    func matchSelection() {
+        let items = selectedItems
+        guard let ref = items.first else { return }
+        status = "Matching 0/\(items.count - 1)…"
+        library.match(reference: ref, targets: items, progress: { n in status = "Matching \(n)/\(items.count - 1)…" },
+                      done: { status = nil })
+        endSelect()
+    }
+
+    func buildGallery() {
+        let items = selectedItems.isEmpty ? filtered : selectedItems
+        let name = galleryName.isEmpty ? "Gallery" : galleryName
+        status = "Building gallery 0/\(items.count)…"
+        endSelect()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let url = GalleryBuilder.build(name: name, items: items) { n in status = "Building gallery \(n)/\(items.count)…" }
+            DispatchQueue.main.async { status = nil; galleryURL = url; galleryName = "" }
+        }
+    }
 
     // MARK: Albums
 
@@ -129,6 +195,10 @@ struct LibraryView: View {
                 ForEach(smart.categories.filter(\.enabled)) { c in
                     if let n = counts[c.id], n > 0 { albumChip(c.id, c.name, c.icon, n) }
                 }
+                let jerseys = counts.filter { $0.key.hasPrefix("jersey-") }.sorted { $0.value > $1.value }.prefix(12)
+                ForEach(Array(jerseys), id: \.key) { pair in albumChip(pair.key, "#" + String(pair.key.dropFirst(7)), "tshirt", pair.value) }
+                let rejected = library.items.filter(\.isRejected).count
+                if rejected > 0 { albumChip("rejected", "Rejected", "xmark.circle", rejected) }
                 let unsorted = library.items.filter { $0.analysis == nil }.count
                 if unsorted > 0 && !smart.isBusy { albumChip("unsorted", "Not analyzed", "questionmark.circle", unsorted) }
             }
@@ -164,6 +234,8 @@ struct LibraryView: View {
                     ProgressView(value: Double(library.importDone), total: Double(max(library.importTotal, 1))).frame(width: 70).tint(Theme.accent)
                     Text("Importing \(library.importDone)/\(library.importTotal)")
                 }
+            } else if let status {
+                pill { ProgressView().controlSize(.small).tint(Theme.accent); Text(status) }
             } else if smart.isBusy {
                 pill {
                     ProgressView().controlSize(.small).tint(Theme.accent)

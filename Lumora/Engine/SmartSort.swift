@@ -109,6 +109,7 @@ final class SmartSort: ObservableObject {
         if enabled["fans"] != nil && a.people >= 8 && (a.clipScores["fans"] ?? 0) >= minP * 0.5 { set.insert("fans") }
         if enabled["celebration"] != nil && a.armsUp && (a.clipScores["celebration"] ?? 0) >= minP * 0.5 { set.insert("celebration") }
         if set.contains("hands") || set.contains("tattoos") || set.contains("shoes") { if enabled["details"] != nil { set.insert("details") } }
+        for n in a.jerseys ?? [] { set.insert("jersey-\(n)") }
         return set
     }
 
@@ -126,6 +127,7 @@ final class SmartSort: ObservableObject {
                     self.done += 1
                     if let result, var current = LibraryStore.shared.items.first(where: { $0.id == item.id }) {
                         current.analysis = result
+                        if current.captured == nil { current.captured = LibraryStore.captureDate(LibraryStore.shared.originalURL(current)) }
                         LibraryStore.shared.update(current, backup: false)
                     }
                     if self.done >= self.queued { self.done = 0; self.queued = 0 }
@@ -169,7 +171,21 @@ final class SmartSort: ObservableObject {
         humans.upperBodyOnly = false
         let pose = VNDetectHumanBodyPoseRequest()
         let saliency = VNGenerateAttentionBasedSaliencyImageRequest()
-        try? handler.perform([faces, humans, pose, saliency])
+        let quality = VNDetectFaceCaptureQualityRequest()
+        let text = VNRecognizeTextRequest()
+        text.recognitionLevel = .accurate
+        text.usesLanguageCorrection = false
+        text.minimumTextHeight = 0.025
+        try? handler.perform([faces, humans, pose, saliency, quality, text])
+        a.faceQuality = (quality.results ?? []).compactMap { $0.faceCaptureQuality.map(Double.init) }.max()
+        // jersey numbers: 1–2 digit numbers read with good confidence
+        var nums = Set<Int>()
+        for obs in text.results ?? [] {
+            guard let cand = obs.topCandidates(1).first, cand.confidence >= 0.5 else { continue }
+            let t = cand.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if t.count <= 2, let n = Int(t), obs.boundingBox.height > 0.03 { nums.insert(n) }
+        }
+        a.jerseys = Array(nums).sorted()
 
         let faceObs = faces.results ?? []
         a.faces = faceObs.count

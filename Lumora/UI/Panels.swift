@@ -102,11 +102,13 @@ struct ColorPanel: View {
     var body: some View {
         PanelScroll {
             Picker("", selection: $page) {
-                Text("Basic").tag(0); Text("Mix").tag(1); Text("Grading").tag(2)
+                Text("Basic").tag(0); Text("Mix").tag(1); Text("Grade").tag(2); Text("Point").tag(3); Text("Calib.").tag(4)
             }.pickerStyle(.segmented)
             switch page {
             case 1: mixer
             case 2: grading
+            case 3: PointColorSection(model: model)
+            case 4: CalibrationSection(model: model)
             default: basic
             }
         }

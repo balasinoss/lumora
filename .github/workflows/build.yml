@@ -45,7 +45,7 @@ jobs:
 
       - name: Build AI models (Denoise, Sky, MobileCLIP)
         run: |
-          if [ ! -d Lumora/Models/Denoiser.mlpackage ] || [ ! -d Lumora/Models/SkySegmenter.mlpackage ] || [ ! -d Lumora/Models/ClipText.mlpackage ]; then
+          if [ ! -d Lumora/Models/Denoiser.mlpackage ] || [ ! -d Lumora/Models/SkySegmenter.mlpackage ] || [ ! -d Lumora/Models/ClipText.mlpackage ] || [ ! -d Lumora/Models/Upscaler.mlpackage ]; then
             pip install -q "torch==2.4.1" "coremltools==8.1" "transformers==4.44.2" "huggingface_hub>=0.24" "numpy<2" 2>&1 | tail -3
             python scripts/convert_models.py Lumora/Models 2>&1 | tee models.log
           fi
@@ -100,8 +100,14 @@ jobs:
 
       - name: Package IPA
         run: |
+          APP=build/Build/Products/Release-iphoneos/Lumora.app
+          # ad-hoc sign with entitlements (app group for the widget); Sideloadly re-signs with your Apple ID
+          if [ -d "$APP/PlugIns/LumoraWidget.appex" ]; then
+            codesign -f -s - --entitlements LumoraWidget/LumoraWidget.entitlements "$APP/PlugIns/LumoraWidget.appex"
+          fi
+          codesign -f -s - --entitlements Lumora/Lumora.entitlements "$APP"
           mkdir -p Payload
-          cp -R build/Build/Products/Release-iphoneos/Lumora.app Payload/
+          cp -R "$APP" Payload/
           zip -qry Lumora.ipa Payload
           ls -lh Lumora.ipa
 

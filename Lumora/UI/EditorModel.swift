@@ -43,6 +43,24 @@ final class EditorModel: ObservableObject {
 
     private var undoStack: [EditSettings] = []
     private var redoStack: [EditSettings] = []
+    /// Edit history (oldest first) with a readable label per step
+    @Published var history: [(label: String, settings: EditSettings)] = []
+    @Published var historyIndex = 0
+    // Presets
+    @Published var activePreset: Preset?
+    @Published var presetAmount: Double = 100
+    private var presetBase: EditSettings?
+    // Eyedropper for point colour
+    @Published var pickingColor = false
+    @Published var selectedPointID: UUID?
+    // Healing
+    @Published var selectedHealID: UUID?
+    @Published var healSize: Double = 0.04
+    @Published var healClone = false
+    // Select Object: drawing a rectangle
+    @Published var drawingObject = false
+    // Versions
+    @Published var versions: [LibraryStore.Version] = []
     private var committed: EditSettings
     private var rendering = false
     private var pending = false
@@ -55,6 +73,8 @@ final class EditorModel: ObservableObject {
         let s = LibraryStore.shared.settings(for: item)
         settings = s
         committed = s
+        history = [("Original import", s)]
+        versions = LibraryStore.shared.versions(item)
         source = PhotoSource(url: LibraryStore.shared.originalURL(item))
         denoiseApplied = AIDenoise.appliedAmount(LibraryStore.shared.dir(item))
         scheduleRender()
@@ -66,20 +86,67 @@ final class EditorModel: ObservableObject {
     /// Call when a gesture/edit finishes.
     func commit() {
         guard settings != committed else { return }
+        let label = EditorModel.describeChange(from: committed, to: settings)
         undoStack.append(committed)
         if undoStack.count > 100 { undoStack.removeFirst() }
         redoStack.removeAll()
         committed = settings
         canUndo = true; canRedo = false
+        if historyIndex < history.count - 1 { history.removeSubrange((historyIndex + 1)...) }
+        history.append((label, settings))
+        if history.count > 150 { history.removeFirst() }
+        historyIndex = history.count - 1
+    }
+
+    func jumpToHistory(_ i: Int) {
+        guard i >= 0 && i < history.count else { return }
+        undoStack.append(settings); redoStack.removeAll()
+        settings = history[i].settings
+        committed = settings
+        historyIndex = i
+        canUndo = true; canRedo = false
+    }
+
+    /// "Exposure +0.50", "Mixer: Orange saturation −20", …
+    static func describeChange(from a: EditSettings, to b: EditSettings) -> String {
+        func flat(_ s: EditSettings) -> [String: String] {
+            guard let d = try? JSONEncoder().encode(s), let root = try? JSONSerialization.jsonObject(with: d) else { return [:] }
+            var out: [String: String] = [:]
+            func walk(_ n: Any, _ p: String) {
+                if let dict = n as? [String: Any] { for (k, v) in dict { walk(v, p.isEmpty ? k : p + "." + k) } }
+                else if let arr = n as? [Any] { for (i, v) in arr.enumerated() { walk(v, p + "." + String(i)) } }
+                else { out[p] = "\(n)" }
+            }
+            walk(root, "")
+            return out
+        }
+        let fa = flat(a), fb = flat(b)
+        let changed = Set(fa.keys).union(fb.keys).filter { fa[$0] != fb[$0] }.sorted()
+        guard let key = changed.first else { return "Edit" }
+        let top = String(key.split(separator: ".").first ?? "")
+        let names: [String: String] = [
+            "masks": "Mask", "healSpots": "Heal", "pointColors": "Point Color", "crop": "Crop", "mixer": "Color Mixer",
+            "curveMaster": "Curve", "curveRed": "Red Curve", "curveGreen": "Green Curve", "curveBlue": "Blue Curve",
+            "gradeShadows": "Grading Shadows", "gradeMidtones": "Grading Midtones", "gradeHighlights": "Grading Highlights",
+            "gradeGlobal": "Grading Global", "bwMix": "B&W Mix", "aiDenoise": "AI Denoise", "profile": "Look"]
+        var name = names[top] ?? top.replacingOccurrences(of: "([a-z])([A-Z])", with: "$1 $2", options: .regularExpression).capitalized
+        if changed.count > 3 && !["masks", "mixer", "healSpots", "crop"].contains(top) { name = "Multiple changes" }
+        if changed.count == 1, let v = fb[key], let d = Double(v), !["masks", "healSpots", "pointColors"].contains(top) {
+            let fmt = abs(d) < 10 && d != d.rounded() ? String(format: "%+.2f", d) : String(format: "%+.0f", d)
+            return "\(name) \(fmt)"
+        }
+        return name
     }
     func undo() {
         guard let prev = undoStack.popLast() else { return }
+        if historyIndex > 0 { historyIndex -= 1 }
         redoStack.append(settings)
         settings = prev; committed = prev
         canUndo = !undoStack.isEmpty; canRedo = true
     }
     func redo() {
         guard let next = redoStack.popLast() else { return }
+        if historyIndex < history.count - 1 { historyIndex += 1 }
         undoStack.append(settings)
         settings = next; committed = next
         canUndo = true; canRedo = !redoStack.isEmpty
@@ -179,6 +246,158 @@ final class EditorModel: ObservableObject {
             $0.contrast = 10; $0.highlights = -35; $0.shadows = 30
             $0.whites = 8; $0.blacks = -8; $0.vibrance = 12; $0.saturation = 3
         }
+    }
+
+    // MARK: Presets
+
+    func applyPreset(_ p: Preset) {
+        if activePreset == nil || presetBase == nil { presetBase = settings }
+        activePreset = p
+        presetAmount = 100
+        settings = PresetStore.apply(p, amount: 1, to: presetBase!)
+        commit()
+    }
+    func setPresetAmount(_ a: Double) {
+        guard let p = activePreset, let base = presetBase else { return }
+        presetAmount = a
+        settings = PresetStore.apply(p, amount: a / 100, to: base)
+    }
+    func clearPresetSession() { activePreset = nil; presetBase = nil }
+
+    // MARK: Point colour (eyedropper)
+
+    /// Samples the preview at a normalised point (top-left origin) and adds a point colour.
+    func pickColor(at p: CGPoint) {
+        pickingColor = false
+        guard let cg = preview?.cgImage else { return }
+        let x = min(max(Int(p.x * CGFloat(cg.width)), 0), cg.width - 1)
+        let y = min(max(Int(p.y * CGFloat(cg.height)), 0), cg.height - 1)
+        // average a 5×5 area
+        guard let crop = cg.cropping(to: CGRect(x: max(0, x - 2), y: max(0, y - 2), width: 5, height: 5)),
+              let px = AIModels.rgbaBytes(crop, width: 1, height: 1) else { return }
+        let pc = PointColor(r: Double(px[0]) / 255, g: Double(px[1]) / 255, b: Double(px[2]) / 255)
+        edit { $0.pointColors.append(pc) }
+        selectedPointID = pc.id
+    }
+    func updatePoint(_ change: (inout PointColor) -> Void) {
+        guard let i = settings.pointColors.firstIndex(where: { $0.id == selectedPointID }) else { return }
+        change(&settings.pointColors[i])
+    }
+
+    // MARK: Healing
+
+    var selectedHeal: HealSpot? { settings.healSpots.first { $0.id == selectedHealID } }
+    func updateHeal(_ change: (inout HealSpot) -> Void) {
+        guard let i = settings.healSpots.firstIndex(where: { $0.id == selectedHealID }) else { return }
+        change(&settings.healSpots[i])
+    }
+
+    /// Adds a heal spot at a normalised point; the best source patch nearby is chosen automatically.
+    func addHeal(at p: CGPoint) {
+        var spot = HealSpot(x: Double(p.x), y: Double(p.y), srcX: Double(p.x) + healSize * 2.5, srcY: Double(p.y), radius: healSize, clone: healClone)
+        if let cg = preview?.cgImage { autoSource(&spot, cg) }
+        edit { $0.healSpots.append(spot) }
+        selectedHealID = spot.id
+    }
+
+    /// Recomputes the colour match after moving the source.
+    func refreshHealShift() {
+        guard var sp = selectedHeal, let cg = preview?.cgImage else { return }
+        sp.shift = colorShift(sp, cg)
+        let fixed = sp
+        updateHeal { $0 = fixed }
+    }
+
+    private func samples(_ cg: CGImage) -> (bytes: [UInt8], w: Int, h: Int)? {
+        let k = min(1, 512 / CGFloat(max(cg.width, cg.height)))
+        let w = max(1, Int(CGFloat(cg.width) * k)), h = max(1, Int(CGFloat(cg.height) * k))
+        guard let b = AIModels.rgbaBytes(cg, width: w, height: h) else { return nil }
+        return (b, w, h)
+    }
+
+    private func ring(_ s: (bytes: [UInt8], w: Int, h: Int), cx: Double, cy: Double, r: Double) -> [[Double]] {
+        var out: [[Double]] = []
+        for k in 0..<24 {
+            let a = Double(k) / 24 * 2 * .pi
+            let x = Int(cx + cos(a) * r), y = Int(cy + sin(a) * r)
+            guard x >= 0, y >= 0, x < s.w, y < s.h else { out.append([-1, -1, -1]); continue }
+            let i = (y * s.w + x) * 4
+            out.append([Double(s.bytes[i]) / 255, Double(s.bytes[i + 1]) / 255, Double(s.bytes[i + 2]) / 255])
+        }
+        return out
+    }
+
+    private func autoSource(_ spot: inout HealSpot, _ cg: CGImage) {
+        guard let s = samples(cg) else { return }
+        let short = Double(min(s.w, s.h))
+        let cx = spot.x * Double(s.w), cy = spot.y * Double(s.h), r = spot.radius * short
+        let dstRing = ring(s, cx: cx, cy: cy, r: r * 1.15)
+        var best: (Double, Double, Double)? = nil   // (cost, x, y)
+        for dist in [2.3, 3.2, 4.5] {
+            for k in 0..<16 {
+                let a = Double(k) / 16 * 2 * .pi
+                let sx = cx + cos(a) * r * dist, sy = cy + sin(a) * r * dist
+                guard sx - r > 0, sy - r > 0, sx + r < Double(s.w), sy + r < Double(s.h) else { continue }
+                let srcRing = ring(s, cx: sx, cy: sy, r: r * 1.15)
+                var cost = 0.0
+                for (p, q) in zip(dstRing, srcRing) where p[0] >= 0 && q[0] >= 0 {
+                    cost += pow(p[0] - q[0], 2) + pow(p[1] - q[1], 2) + pow(p[2] - q[2], 2)
+                }
+                cost *= 1 + dist * 0.05
+                if best == nil || cost < best!.0 { best = (cost, sx, sy) }
+            }
+        }
+        if let best { spot.srcX = best.1 / Double(s.w); spot.srcY = best.2 / Double(s.h) }
+        spot.shift = colorShift(spot, cg)
+    }
+
+    private func colorShift(_ spot: HealSpot, _ cg: CGImage) -> [Double] {
+        guard !spot.clone, let s = samples(cg) else { return [0, 0, 0] }
+        let short = Double(min(s.w, s.h))
+        let r = spot.radius * short * 1.15
+        func mean(_ ring: [[Double]]) -> [Double] {
+            let v = ring.filter { $0[0] >= 0 }
+            guard !v.isEmpty else { return [0, 0, 0] }
+            return (0..<3).map { c in v.map { pow($0[c], 2.2) }.reduce(0, +) / Double(v.count) }
+        }
+        let d = mean(ring(s, cx: spot.x * Double(s.w), cy: spot.y * Double(s.h), r: r))
+        let src = mean(ring(s, cx: spot.srcX * Double(s.w), cy: spot.srcY * Double(s.h), r: r))
+        return (0..<3).map { d[$0] - src[$0] }
+    }
+
+    // MARK: Select Object
+
+    func addObjectMask(rect: NormRect) {
+        drawingObject = false
+        guard let source else { return }
+        var layer = MaskLayer(kind: .object)
+        layer.objectRect = rect
+        maskBusy = "Finding the object…"
+        let dir = itemDir, id = layer.id
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try MaskEngine.shared.generateObject(rect: rect, layerID: id, source: source, itemDir: dir)
+                DispatchQueue.main.async {
+                    self.maskBusy = nil
+                    self.edit { $0.masks.append(layer) }
+                    self.selectedMaskID = id
+                }
+            } catch {
+                DispatchQueue.main.async { self.maskBusy = nil; self.maskError = error.localizedDescription }
+            }
+        }
+    }
+
+    // MARK: Versions
+
+    func saveVersion(named name: String) {
+        versions.append(LibraryStore.Version(name: name.isEmpty ? "Version \(versions.count + 1)" : name, settings: settings))
+        LibraryStore.shared.saveVersions(versions, for: item)
+    }
+    func applyVersion(_ v: LibraryStore.Version) { settings = v.settings; commit() }
+    func deleteVersion(_ v: LibraryStore.Version) {
+        versions.removeAll { $0.id == v.id }
+        LibraryStore.shared.saveVersions(versions, for: item)
     }
 
     // MARK: Masks
@@ -310,12 +529,27 @@ final class EditorModel: ObservableObject {
 
     // MARK: Export
 
-    func export(format: RenderPipeline.ExportFormat, quality: Double, maxLongEdge: CGFloat?, completion: @escaping (URL?) -> Void) {
+    @Published var exportProgress: Double?
+
+    func export(format: RenderPipeline.ExportFormat, quality: Double, maxLongEdge: CGFloat?, layout: ExportLayout = ExportLayout(),
+                upscale: Int = 1, completion: @escaping (URL?) -> Void) {
         guard let source else { completion(nil); return }
         let s = settings, name = (item.name as NSString).deletingPathExtension
+        let bg = UIApplication.shared.beginBackgroundTask(withName: "export")
         DispatchQueue.global(qos: .userInitiated).async {
+            defer { UIApplication.shared.endBackgroundTask(bg) }
             let pipeline = RenderPipeline.shared
-            guard let img = pipeline.renderFull(source: source, settings: s),
+            guard var img = pipeline.renderFull(source: source, settings: s) else {
+                DispatchQueue.main.async { completion(nil) }; return
+            }
+            if upscale > 1 {
+                if let up = try? Upscaler.upscale(img, factor: upscale, progress: { p in DispatchQueue.main.async { self.exportProgress = p } }) {
+                    img = up
+                }
+                DispatchQueue.main.async { self.exportProgress = nil }
+            }
+            img = layout.apply(img)
+            guard
                   let data = pipeline.encode(img, format: format, quality: quality, maxLongEdge: maxLongEdge, properties: source.properties) else {
                 DispatchQueue.main.async { completion(nil) }; return
             }

@@ -36,6 +36,7 @@ enum Kernels {
     static let sharpenMask = color("sharpenMask")
     static let maskOverlay = color("maskOverlay")
     static let maskCombine = color("maskCombine")
+    static let pointColor = color("pointColor")
 }
 
 extension CIImage {

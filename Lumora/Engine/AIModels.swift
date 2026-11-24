@@ -18,6 +18,7 @@ enum AIModels {
     static let sky: MLModel? = load("SkySegmenter")
     static let clipImage: MLModel? = load("ClipImage")
     static let clipText: MLModel? = load("ClipText")
+    static let upscaler: MLModel? = load("Upscaler")
 
     /// Fills a [1,3,H,W] Float32 multi-array from an RGBA8 bitmap (values 0...1).
     static func planarArray(from cg: CGImage, width: Int, height: Int) -> MLMultiArray? {

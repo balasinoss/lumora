@@ -34,8 +34,15 @@ final class MaskEngine {
         case .sky: return "sky.png"
         case .people: return "people.png"
         case .person: return "person\(personIndex).png"
+        case .faceSkin: return "face-skin.png"
+        case .eyes: return "face-eyes.png"
+        case .lips: return "face-lips.png"
+        case .teeth: return "face-teeth.png"
         default: return nil
         }
+    }
+    func objectURL(_ itemDir: URL, layerID: UUID) -> URL {
+        masksDir(itemDir).appendingPathComponent("object-\(layerID.uuidString).png")
     }
     func maskURL(_ itemDir: URL, kind: MaskKind, personIndex: Int) -> URL? {
         fileName(kind: kind, personIndex: personIndex).map { masksDir(itemDir).appendingPathComponent($0) }
@@ -99,6 +106,9 @@ final class MaskEngine {
             mask = CIImage(cvPixelBuffer: pb)
         case .sky:
             mask = try skyMask(cg)
+        case .faceSkin, .eyes, .lips, .teeth:
+            try generateFaceParts(cg, itemDir: itemDir)
+            return
         default:
             return
         }
@@ -109,6 +119,120 @@ final class MaskEngine {
             .cropped(to: CGRect(origin: .zero, size: size))
         guard let png = ctx.pngRepresentation(of: mask, format: .L8, colorSpace: CGColorSpaceCreateDeviceGray(), options: [:]) else { throw MaskError.noImage }
         try png.write(to: url, options: .atomic)
+    }
+
+    /// Face skin, eyes, lips and teeth masks from Vision face landmarks (all faces in the photo).
+    private func generateFaceParts(_ cg: CGImage, itemDir: URL) throws {
+        let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+        let req = VNDetectFaceLandmarksRequest()
+        try handler.perform([req])
+        let faces = req.results ?? []
+        guard !faces.isEmpty else { throw MaskError.notFound("face") }
+        let W = cg.width, H = cg.height
+        let size = CGSize(width: W, height: H)
+        func context() -> CGContext? {
+            guard let c = CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: W, space: CGColorSpaceCreateDeviceGray(),
+                                    bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
+            c.setFillColor(gray: 0, alpha: 1); c.fill(CGRect(x: 0, y: 0, width: W, height: H))
+            return c
+        }
+        func path(_ region: VNFaceLandmarkRegion2D?, scale: CGFloat = 1) -> CGPath? {
+            guard let region, region.pointCount > 2 else { return nil }
+            var pts = region.pointsInImage(imageSize: size)
+            if scale != 1 {
+                let cx = pts.map(\.x).reduce(0, +) / CGFloat(pts.count), cy = pts.map(\.y).reduce(0, +) / CGFloat(pts.count)
+                pts = pts.map { CGPoint(x: cx + ($0.x - cx) * scale, y: cy + ($0.y - cy) * scale) }
+            }
+            let p = CGMutablePath(); p.addLines(between: pts); p.closeSubpath(); return p
+        }
+        guard let skin = context(), let eyes = context(), let lips = context(), let teeth = context() else { throw MaskError.noImage }
+        for f in faces {
+            guard let lm = f.landmarks else { continue }
+            let bb = VNImageRectForNormalizedRect(f.boundingBox, W, H)
+            // face oval: jaw line + forehead arc
+            if let contour = lm.faceContour, contour.pointCount > 3 {
+                var pts = contour.pointsInImage(imageSize: size)
+                let left = pts.first!, right = pts.last!
+                let top = bb.maxY + bb.height * 0.12
+                let cx = (left.x + right.x) / 2, rx = abs(right.x - left.x) / 2, ry = max(top - (left.y + right.y) / 2, 1)
+                for k in 1..<12 {
+                    let a = CGFloat.pi * CGFloat(k) / 12
+                    pts.append(CGPoint(x: cx + rx * cos(a), y: (left.y + right.y) / 2 + ry * sin(a)))
+                }
+                let p = CGMutablePath(); p.addLines(between: pts); p.closeSubpath()
+                skin.setFillColor(gray: 1, alpha: 1); skin.addPath(p); skin.fillPath()
+            } else {
+                skin.setFillColor(gray: 1, alpha: 1); skin.fillEllipse(in: bb)
+            }
+            // cut eyes, brows and mouth out of the skin
+            skin.setFillColor(gray: 0, alpha: 1)
+            for r in [lm.leftEye, lm.rightEye, lm.outerLips] { if let p = path(r, scale: 1.25) { skin.addPath(p); skin.fillPath() } }
+            for r in [lm.leftEyebrow, lm.rightEyebrow] {
+                if let reg = r, reg.pointCount > 1 {
+                    skin.setStrokeColor(gray: 0, alpha: 1); skin.setLineWidth(bb.height * 0.05); skin.setLineCap(.round)
+                    skin.addLines(between: reg.pointsInImage(imageSize: size)); skin.strokePath()
+                }
+            }
+            eyes.setFillColor(gray: 1, alpha: 1)
+            for r in [lm.leftEye, lm.rightEye] { if let p = path(r, scale: 1.15) { eyes.addPath(p); eyes.fillPath() } }
+            lips.setFillColor(gray: 1, alpha: 1)
+            if let p = path(lm.outerLips) { lips.addPath(p); lips.fillPath() }
+            lips.setFillColor(gray: 0, alpha: 1)
+            if let p = path(lm.innerLips) { lips.addPath(p); lips.fillPath() }
+            teeth.setFillColor(gray: 1, alpha: 1)
+            if let p = path(lm.innerLips, scale: 0.95) { teeth.addPath(p); teeth.fillPath() }
+        }
+        let feather = max(1.5, CGFloat(max(W, H)) * 0.002)
+        for (c, kind) in [(skin, MaskKind.faceSkin), (eyes, .eyes), (lips, .lips), (teeth, .teeth)] {
+            guard let img = c.makeImage(), let url = maskURL(itemDir, kind: kind, personIndex: 0) else { continue }
+            var m = CIImage(cgImage: img)
+            m = m.lumoraBlur(kind == .faceSkin ? feather * 4 : feather)
+            if let png = ctx.pngRepresentation(of: m, format: .L8, colorSpace: CGColorSpaceCreateDeviceGray(), options: [:]) {
+                try? png.write(to: url, options: .atomic)
+            }
+        }
+    }
+
+    /// "Select Object": AI finds the object inside a rough rectangle (normalised, top-left origin).
+    func generateObject(rect: NormRect, layerID: UUID, source: PhotoSource, itemDir: URL) throws {
+        guard let cg = analysisImage(source: source) else { throw MaskError.noImage }
+        let W = CGFloat(cg.width), H = CGFloat(cg.height)
+        var r = CGRect(x: rect.x * W, y: rect.y * H, width: rect.w * W, height: rect.h * H)
+        r = r.insetBy(dx: -r.width * 0.12, dy: -r.height * 0.12).intersection(CGRect(x: 0, y: 0, width: W, height: H)).integral
+        guard r.width > 8, r.height > 8, let crop = cg.cropping(to: r) else { throw MaskError.notFound("object") }
+        let handler = VNImageRequestHandler(cgImage: crop, options: [:])
+        let req = VNGenerateForegroundInstanceMaskRequest()
+        try handler.perform([req])
+        var piece: CIImage
+        if let obs = req.results?.first, !obs.allInstances.isEmpty {
+            // prefer the instance under the centre of the box
+            let labels = obs.instanceMask
+            CVPixelBufferLockBaseAddress(labels, .readOnly)
+            let lw = CVPixelBufferGetWidth(labels), lh = CVPixelBufferGetHeight(labels)
+            let row = CVPixelBufferGetBytesPerRow(labels)
+            var chosen = IndexSet(obs.allInstances)
+            if let base = CVPixelBufferGetBaseAddress(labels) {
+                let v = Int(base.load(fromByteOffset: (lh / 2) * row + lw / 2, as: UInt8.self))
+                if v > 0 && obs.allInstances.contains(v) { chosen = IndexSet(integer: v) }
+            }
+            CVPixelBufferUnlockBaseAddress(labels, .readOnly)
+            let pb = try obs.generateScaledMaskForImage(forInstances: chosen, from: handler)
+            piece = CIImage(cvPixelBuffer: pb)
+            piece = piece.transformed(by: CGAffineTransform(scaleX: r.width / piece.extent.width, y: r.height / piece.extent.height))
+        } else {
+            // nothing detected: fall back to a soft ellipse inside the box
+            piece = CIFilter(name: "CIRadialGradient", parameters: [
+                "inputCenter": CIVector(x: r.width / 2, y: r.height / 2), "inputRadius0": min(r.width, r.height) * 0.3,
+                "inputRadius1": min(r.width, r.height) * 0.5, "inputColor0": CIColor.white, "inputColor1": CIColor.black])!.outputImage!
+                .cropped(to: CGRect(x: 0, y: 0, width: r.width, height: r.height))
+        }
+        // place into a full-size black canvas (CI origin is bottom-left)
+        let placed = piece.transformed(by: CGAffineTransform(translationX: r.minX, y: H - r.maxY))
+        let full = placed.composited(over: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: W, height: H)))
+            .cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
+        guard let png = ctx.pngRepresentation(of: full, format: .L8, colorSpace: CGColorSpaceCreateDeviceGray(), options: [:]) else { throw MaskError.noImage }
+        try png.write(to: objectURL(itemDir, layerID: layerID), options: .atomic)
+        invalidate(itemDir)
     }
 
     private func skyMask(_ cg: CGImage) throws -> CIImage {
@@ -162,7 +286,11 @@ final class MaskEngine {
         var base = black
         var invert = layer.invert
         switch layer.kind {
-        case .subject, .sky, .people, .person, .background:
+        case .object:
+            if let m = loadPNG(objectURL(itemDir, layerID: layer.id)) {
+                base = m.transformed(by: CGAffineTransform(scaleX: E.width / m.extent.width, y: E.height / m.extent.height)).cropped(to: E)
+            }
+        case .subject, .sky, .people, .person, .background, .faceSkin, .eyes, .lips, .teeth:
             if let url = maskURL(itemDir, kind: layer.kind, personIndex: layer.personIndex), let m = loadPNG(url) {
                 base = m.transformed(by: CGAffineTransform(scaleX: E.width / m.extent.width, y: E.height / m.extent.height)).cropped(to: E)
             }

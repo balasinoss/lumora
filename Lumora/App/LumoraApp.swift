@@ -4,6 +4,7 @@ import SwiftUI
 struct LumoraApp: App {
     @StateObject private var library = LibraryStore.shared
     @StateObject private var cloud = CloudSync.shared
+    @Environment(\.scenePhase) private var phase
 
     init() {
         // Warm up the lens database in the background so Optics opens instantly.
@@ -11,6 +12,7 @@ struct LumoraApp: App {
             LensDatabase.shared.loadIfNeeded()
             _ = ClipTokenizer.shared
         }
+        BackgroundWork.register()
         UISegmentedControl.appearance().selectedSegmentTintColor = UIColor(red: 0.22, green: 0.22, blue: 0.26, alpha: 1)
     }
 
@@ -22,6 +24,11 @@ struct LumoraApp: App {
                 .environmentObject(SmartSort.shared)
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
+                .onAppear { ExpiryWatcher.shared.start() }
+        }
+        .onChange(of: phase) { _, p in
+            if p == .background { BackgroundWork.didEnterBackground() }
+            if p == .active { ExpiryWatcher.shared.refreshMessage() }
         }
     }
 }

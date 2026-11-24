@@ -120,6 +120,20 @@ struct EditSettings: Codable, Equatable {
     var offsetX: Double = 0
     var offsetY: Double = 0
 
+    // MARK: Calibration
+    var calRedHue: Double = 0
+    var calRedSat: Double = 0
+    var calGreenHue: Double = 0
+    var calGreenSat: Double = 0
+    var calBlueHue: Double = 0
+    var calBlueSat: Double = 0
+    var calShadowTint: Double = 0
+    var hasCalibration: Bool { calRedHue != 0 || calRedSat != 0 || calGreenHue != 0 || calGreenSat != 0 || calBlueHue != 0 || calBlueSat != 0 }
+
+    // MARK: Point colour & healing
+    var pointColors: [PointColor] = []
+    var healSpots: [HealSpot] = []
+
     // MARK: AI
     var aiDenoise: Bool = false
     var aiDenoiseAmount: Double = 50
@@ -179,6 +193,27 @@ struct EditSettings: Codable, Equatable {
         guard let mergedData = try? JSONSerialization.data(withJSONObject: merged) else { return nil }
         return try? JSONDecoder().decode(EditSettings.self, from: mergedData)
     }
+}
+
+/// Adjust one picked colour (like a targeted HSL).
+struct PointColor: Codable, Equatable, Identifiable {
+    var id = UUID()
+    var r: Double, g: Double, b: Double      // sampled colour, gamma sRGB 0...1
+    var hueShift: Double = 0                  // -100...100
+    var satShift: Double = 0
+    var lumShift: Double = 0
+    var range: Double = 50                    // 0...100
+}
+
+/// Heal / clone spot (normalised coordinates in the original frame, top-left origin).
+struct HealSpot: Codable, Equatable, Identifiable {
+    var id = UUID()
+    var x: Double, y: Double
+    var srcX: Double, srcY: Double
+    var radius: Double                        // fraction of the short side
+    var feather: Double = 0.5
+    var clone: Bool = false
+    var shift: [Double] = [0, 0, 0]           // colour correction (linear RGB) for heal mode
 }
 
 enum ColorBand: Int, CaseIterable, Identifiable {

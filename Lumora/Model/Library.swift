@@ -1,6 +1,8 @@
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import ImageIO
+import CoreImage
 
 struct PhotoItem: Identifiable, Codable, Equatable, Hashable {
     var id: UUID
@@ -14,6 +16,10 @@ struct PhotoItem: Identifiable, Codable, Equatable, Hashable {
     var analysis: PhotoAnalysis? = nil
     /// Albums the user added this photo to by hand
     var manualAlbums: [String]? = nil
+    /// When the photo was taken (EXIF), for burst grouping
+    var captured: Date? = nil
+    var rejected: Bool? = nil
+    var isRejected: Bool { rejected ?? false }
 }
 
 struct PhotoAnalysis: Codable, Equatable, Hashable {
@@ -25,6 +31,8 @@ struct PhotoAnalysis: Codable, Equatable, Hashable {
     var armsUp: Bool = false
     var clipScores: [String: Double] = [:]   // category id -> probability
     var version: Int = 1
+    var faceQuality: Double? = nil           // 0...1, Vision face capture quality (eyes open, sharp face)
+    var jerseys: [Int]? = nil                // jersey numbers read from the photo
 }
 
 /// Stores photos in Documents/Library/<id>/ (original.<ext>, edits.json, item.json, thumb.jpg).
@@ -106,7 +114,8 @@ final class LibraryStore: ObservableObject {
         var ext = url.pathExtension.lowercased()
         if ext.isEmpty { ext = "jpg" }
         let isRAW = PhotoSource.rawTypes.contains(ext) || (UTType(filenameExtension: ext)?.conforms(to: .rawImage) ?? false)
-        let item = PhotoItem(id: id, name: url.lastPathComponent, ext: ext, added: added, isRAW: isRAW)
+        var item = PhotoItem(id: id, name: url.lastPathComponent, ext: ext, added: added, isRAW: isRAW)
+        item.captured = LibraryStore.captureDate(url)
         do {
             try fm.createDirectory(at: dir(item), withIntermediateDirectories: true)
             if fm.fileExists(atPath: originalURL(item).path) { try fm.removeItem(at: originalURL(item)) }
@@ -122,6 +131,149 @@ final class LibraryStore: ObservableObject {
         if settings == nil { makeQuickThumbnail(item) } else { makeThumbnail(item, settings: s) }
         if backup { CloudSync.shared.backup(item: item, settings: s, exportJPEG: false, includeOriginal: true) }
         return item
+    }
+
+    static func captureDate(_ url: URL) -> Date? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any] else { return nil }
+        let exif = props[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]
+        guard let str = exif[kCGImagePropertyExifDateTimeOriginal as String] as? String else { return nil }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        guard var d = f.date(from: str) else { return nil }
+        if let sub = exif[kCGImagePropertyExifSubsecTimeOriginal as String] as? String, let frac = Double("0." + sub) {
+            d.addTimeInterval(frac)
+        }
+        return d
+    }
+
+    // MARK: Bursts & culling
+
+    /// Groups photos shot within `gap` seconds of each other (2+ photos per burst), newest first.
+    func bursts(gap: TimeInterval = 1.0) -> [[PhotoItem]] {
+        let dated = items.filter { $0.captured != nil }.sorted { $0.captured! < $1.captured! }
+        var groups: [[PhotoItem]] = []
+        var cur: [PhotoItem] = []
+        for it in dated {
+            if let last = cur.last, it.captured!.timeIntervalSince(last.captured!) > gap {
+                if cur.count > 1 { groups.append(cur) }
+                cur = []
+            }
+            cur.append(it)
+        }
+        if cur.count > 1 { groups.append(cur) }
+        return groups.reversed()
+    }
+
+    /// Score used to pick the best frame of a burst.
+    static func keeperScore(_ it: PhotoItem) -> Double {
+        guard let a = it.analysis else { return 0 }
+        return a.sharpness + (a.faceQuality ?? 0.3) * 25 + (it.flagged ? 100 : 0)
+    }
+
+    func bestOf(_ burst: [PhotoItem]) -> PhotoItem? { burst.max { LibraryStore.keeperScore($0) < LibraryStore.keeperScore($1) } }
+
+    /// Keeps the best frame of each burst and rejects the rest.
+    func keepBest(_ burstsToCull: [[PhotoItem]]) {
+        for b in burstsToCull {
+            guard let best = bestOf(b) else { continue }
+            for var it in b {
+                it.rejected = it.id != best.id
+                if it.id == best.id { it.flagged = true }
+                update(it, backup: false)
+            }
+        }
+    }
+
+    func setPick(_ item: PhotoItem, picked: Bool?) {
+        var it = item
+        switch picked {
+        case .some(true): it.flagged = true; it.rejected = false
+        case .some(false): it.flagged = false; it.rejected = true
+        case .none: it.flagged = false; it.rejected = false
+        }
+        update(it, backup: false)
+    }
+
+    // MARK: Presets on many photos
+
+    func applyPreset(_ preset: Preset, amount: Double = 1, to targets: [PhotoItem]) {
+        for it in targets {
+            let s = PresetStore.apply(preset, amount: amount, to: settings(for: it))
+            saveSettings(s, for: it)
+            makeThumbnail(it, settings: s)
+            CloudSync.shared.backup(item: it, settings: s, exportJPEG: true)
+        }
+    }
+
+    // MARK: Match exposure & white balance to a reference photo
+
+    private func meanColor(_ item: PhotoItem, _ s: EditSettings) -> [Double]? {
+        guard let src = PhotoSource(url: originalURL(item)),
+              let img = RenderPipeline.shared.renderFull(source: src, settings: s, maxDimension: 384) else { return nil }
+        let ctx = RenderPipeline.shared.context
+        let avg = img.applyingFilter("CIAreaAverage", parameters: [kCIInputExtentKey: CIVector(cgRect: img.extent)])
+        var px = [Float](repeating: 0, count: 4)
+        ctx.render(avg, toBitmap: &px, rowBytes: 16, bounds: CGRect(x: 0, y: 0, width: 1, height: 1), format: .RGBAf,
+                   colorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB))
+        return [Double(px[0]), Double(px[1]), Double(px[2])].map { max($0, 1e-4) }
+    }
+
+    func match(reference: PhotoItem, targets: [PhotoItem], progress: @escaping (Int) -> Void, done: @escaping () -> Void) {
+        let refSettings = settings(for: reference)
+        let targetsWithSettings = targets.filter { $0.id != reference.id }.map { ($0, settings(for: $0)) }
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let ref = self.meanColor(reference, refSettings) else { DispatchQueue.main.async { done() }; return }
+            func luma(_ c: [Double]) -> Double { 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] }
+            var n = 0
+            for (item, start) in targetsWithSettings {
+                var s = start
+                for _ in 0..<3 {
+                    guard let c = self.meanColor(item, s) else { break }
+                    let dEV = log2(luma(ref) / luma(c))
+                    s.exposure = min(5, max(-5, s.exposure + dEV * 0.9))
+                    // blue/red balance -> temperature, green -> tint
+                    let warm = log2((c[2] / c[0]) / (ref[2] / ref[0]))        // > 0: target is too blue
+                    let green = log2((c[1] / ((c[0] + c[2]) / 2)) / (ref[1] / ((ref[0] + ref[2]) / 2)))
+                    if item.isRAW {
+                        let src = PhotoSource(url: self.originalURL(item))
+                        let (t, ti) = src?.rawWhiteBalance(s) ?? (5500, 0)
+                        s.whiteBalance = "Custom"
+                        s.temperature = min(12000, max(2000, t * pow(2, warm * 0.55)))
+                        s.tint = min(150, max(-150, ti + green * 90))
+                    } else {
+                        s.whiteBalance = "Custom"
+                        s.tempShift = min(100, max(-100, s.tempShift + warm * 45))
+                        s.tint = min(100, max(-100, s.tint + green * 70))
+                    }
+                }
+                DispatchQueue.main.async {
+                    self.saveSettings(s, for: item)
+                    self.makeThumbnail(item, settings: s)
+                    n += 1
+                    progress(n)
+                }
+            }
+            DispatchQueue.main.async { done() }
+        }
+    }
+
+    // MARK: Versions
+
+    struct Version: Codable, Identifiable {
+        var id = UUID()
+        var name: String
+        var date = Date()
+        var settings: EditSettings
+    }
+    func versionsURL(_ item: PhotoItem) -> URL { dir(item).appendingPathComponent("versions.json") }
+    func versions(_ item: PhotoItem) -> [Version] {
+        guard let d = try? Data(contentsOf: versionsURL(item)) else { return [] }
+        return (try? JSONDecoder().decode([Version].self, from: d)) ?? []
+    }
+    func saveVersions(_ v: [Version], for item: PhotoItem) {
+        if let d = try? JSONEncoder().encode(v) { try? d.write(to: versionsURL(item), options: .atomic) }
     }
 
     func delete(_ item: PhotoItem) {

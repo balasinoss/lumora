@@ -56,8 +56,16 @@ final class RenderPipeline {
         let short0 = min(E0.width, E0.height)
         let px = info.pixelScale
 
-        // 1. Optics (linear light)
+        // 1. Optics (linear light) and healing
         img = applyLens(img, s: s, info: info)
+        if !s.healSpots.isEmpty { img = applyHeal(img, spots: s.healSpots) }
+        if s.hasCalibration {
+            let m = calibrationMatrix(s)
+            img = img.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: m[0], y: m[1], z: m[2], w: 0),
+                "inputGVector": CIVector(x: m[3], y: m[4], z: m[5], w: 0),
+                "inputBVector": CIVector(x: m[6], y: m[7], z: m[8], w: 0)])
+        }
 
         // 2. White balance
         if s.whiteBalance == "Auto" {
@@ -151,10 +159,22 @@ final class RenderPipeline {
                 s.vibrance / 100, s.saturation / 100, s.blackAndWhite ? 1.0 : 0.0, v4(bw, 0), v4(bw, 4)]) ?? img
         }
 
-        // 11. Colour grading
-        if s.hasGrading {
+        // 10b. Point colour
+        for pc in s.pointColors where pc.hueShift != 0 || pc.satShift != 0 || pc.lumShift != 0 {
+            let t = RenderPipeline.oklab(r: pc.r, g: pc.g, b: pc.b)
+            img = Kernels.pointColor.apply(extent: img.extent, arguments: [img, CIVector(x: t.0, y: t.1, z: t.2), pc.range,
+                                                                            CIVector(x: pc.hueShift / 100, y: pc.satShift / 100, z: pc.lumShift / 100)]) ?? img
+        }
+
+        // 11. Colour grading (+ calibration shadow tint)
+        if s.hasGrading || s.calShadowTint != 0 {
+            var sh = wheelVector(s.gradeShadows)
+            if s.calShadowTint != 0 {
+                let k = CGFloat(s.calShadowTint / 100) * 0.06
+                sh = CIVector(x: sh.x + k, y: sh.y - k, z: sh.z + k, w: sh.w)
+            }
             img = Kernels.colorGrade.apply(extent: img.extent, arguments: [img,
-                wheelVector(s.gradeShadows), wheelVector(s.gradeMidtones), wheelVector(s.gradeHighlights), wheelVector(s.gradeGlobal),
+                sh, wheelVector(s.gradeMidtones), wheelVector(s.gradeHighlights), wheelVector(s.gradeGlobal),
                 s.gradeBlending / 100, s.gradeBalance / 100]) ?? img
         }
 
@@ -207,6 +227,71 @@ final class RenderPipeline {
         // 15. Back to linear for the output colour space
         img = img.applyingFilter("CISRGBToneCurveToLinear")
         return img.transformed(by: CGAffineTransform(translationX: -E.origin.x, y: -E.origin.y))
+    }
+
+    // MARK: Calibration, point colour, healing
+
+    /// Matrix that rotates / scales each RGB primary while keeping greys neutral.
+    func calibrationMatrix(_ s: EditSettings) -> [CGFloat] {
+        let w = [0.2126, 0.7152, 0.0722]
+        func toYIQ(_ c: [Double]) -> [Double] {
+            [0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2], 0.596 * c[0] - 0.274 * c[1] - 0.322 * c[2], 0.211 * c[0] - 0.523 * c[1] + 0.312 * c[2]]
+        }
+        func fromYIQ(_ c: [Double]) -> [Double] {
+            [c[0] + 0.956 * c[1] + 0.621 * c[2], c[0] - 0.272 * c[1] - 0.647 * c[2], c[0] - 1.106 * c[1] + 1.703 * c[2]]
+        }
+        func adjust(_ prim: [Double], hue: Double, sat: Double) -> [Double] {
+            var q = toYIQ(prim)
+            let a = hue / 100 * 30 * .pi / 180
+            let i = q[1] * cos(a) - q[2] * sin(a), qq = q[1] * sin(a) + q[2] * cos(a)
+            let k = max(0, 1 + sat / 100 * 0.6)
+            q[1] = i * k; q[2] = qq * k
+            return fromYIQ(q)
+        }
+        let r = adjust([1, 0, 0], hue: s.calRedHue, sat: s.calRedSat)
+        let g = adjust([0, 1, 0], hue: s.calGreenHue, sat: s.calGreenSat)
+        let b = adjust([0, 0, 1], hue: s.calBlueHue, sat: s.calBlueSat)
+        // columns r,g,b; correct so (1,1,1) stays white
+        var m = [[r[0], g[0], b[0]], [r[1], g[1], b[1]], [r[2], g[2], b[2]]]
+        for row in 0..<3 {
+            let sum = m[row][0] + m[row][1] + m[row][2]
+            for col in 0..<3 { m[row][col] -= (sum - 1) * w[col] }
+        }
+        return m.flatMap { $0 }.map { CGFloat($0) }
+    }
+
+    static func oklab(r: Double, g: Double, b: Double) -> (CGFloat, CGFloat, CGFloat) {
+        func lin(_ c: Double) -> Double { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+        let R = lin(r), G = lin(g), B = lin(b)
+        let l = cbrt(0.4122214708 * R + 0.5363325363 * G + 0.0514459929 * B)
+        let m = cbrt(0.2119034982 * R + 0.6806995451 * G + 0.1073969566 * B)
+        let s = cbrt(0.0883024619 * R + 0.2817188376 * G + 0.6299787005 * B)
+        return (CGFloat(0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s),
+                CGFloat(1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s),
+                CGFloat(0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s))
+    }
+
+    /// Heal / clone spots: copy a nearby patch over each spot with a soft edge.
+    func applyHeal(_ img: CIImage, spots: [HealSpot]) -> CIImage {
+        var out = img
+        let E = img.extent
+        let short = min(E.width, E.height)
+        for sp in spots {
+            let r = CGFloat(sp.radius) * short
+            let dst = CGPoint(x: CGFloat(sp.x) * E.width, y: CGFloat(1 - sp.y) * E.height)
+            let src = CGPoint(x: CGFloat(sp.srcX) * E.width, y: CGFloat(1 - sp.srcY) * E.height)
+            var patch = img.clampedToExtent().transformed(by: CGAffineTransform(translationX: dst.x - src.x, y: dst.y - src.y))
+            if !sp.clone {
+                patch = patch.applyingFilter("CIColorMatrix", parameters: [
+                    "inputBiasVector": CIVector(x: CGFloat(sp.shift[0]), y: CGFloat(sp.shift[1]), z: CGFloat(sp.shift[2]), w: 0)])
+            }
+            let inner = r * CGFloat(1 - min(max(sp.feather, 0), 0.95))
+            let mask = CIFilter(name: "CIRadialGradient", parameters: [
+                "inputCenter": CIVector(cgPoint: dst), "inputRadius0": inner, "inputRadius1": r,
+                "inputColor0": CIColor.white, "inputColor1": CIColor.black])!.outputImage!
+            out = patch.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: out, kCIInputMaskImageKey: mask]).cropped(to: E)
+        }
+        return out
     }
 
     private func hueDeg(_ v: Double, from: Double, to: Double) -> CGFloat { CGFloat(from + (to - from) * v / 100) }

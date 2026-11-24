@@ -133,6 +133,48 @@ def build_sky():
     print("saved", dst)
 
 
+# ---------------------------------------------------------------- Upscaler (Real-ESRGAN general x4v3, BSD-3)
+class SRVGGNetCompact(nn.Module):
+    def __init__(self, num_feat=64, num_conv=32, upscale=4):
+        super().__init__()
+        self.upscale = upscale
+        layers = [nn.Conv2d(3, num_feat, 3, 1, 1), nn.PReLU(num_parameters=num_feat)]
+        for _ in range(num_conv):
+            layers += [nn.Conv2d(num_feat, num_feat, 3, 1, 1), nn.PReLU(num_parameters=num_feat)]
+        layers += [nn.Conv2d(num_feat, 3 * upscale * upscale, 3, 1, 1)]
+        self.body = nn.ModuleList(layers)
+        self.upsampler = nn.PixelShuffle(upscale)
+
+    def forward(self, x):
+        out = x
+        for layer in self.body:
+            out = layer(out)
+        out = self.upsampler(out)
+        base = torch.nn.functional.interpolate(x, scale_factor=self.upscale, mode="nearest")
+        return torch.clamp(out + base, 0.0, 1.0)
+
+
+def build_upscaler():
+    dst = os.path.join(OUT, "Upscaler.mlpackage")
+    if os.path.exists(dst):
+        return
+    w = fetch("https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth", "realesr-general-x4v3.pth")
+    net = SRVGGNetCompact()
+    sd = torch.load(w, map_location="cpu", weights_only=False)
+    sd = sd.get("params_ema", sd.get("params", sd))
+    net.load_state_dict(sd, strict=True)
+    net.eval()
+    with torch.no_grad():
+        traced = torch.jit.trace(net, torch.rand(1, 3, 256, 256))
+    ml = ct.convert(traced, convert_to="mlprogram",
+                    inputs=[ct.TensorType(name="image", shape=(1, 3, 256, 256), dtype=np.float32)],
+                    outputs=[ct.TensorType(name="output", dtype=np.float32)],
+                    compute_precision=ct.precision.FLOAT16,
+                    minimum_deployment_target=ct.target.iOS17)
+    ml.save(dst)
+    print("saved", dst)
+
+
 # ---------------------------------------------------------------- MobileCLIP
 def build_clip():
     img_dst = os.path.join(OUT, "ClipImage.mlpackage")
@@ -162,7 +204,7 @@ def build_clip():
 if __name__ == "__main__":
     import traceback
     failed = []
-    for fn in (build_denoiser, build_sky, build_clip):
+    for fn in (build_denoiser, build_sky, build_clip, build_upscaler):
         try:
             fn()
         except Exception:

@@ -348,6 +348,26 @@ float4 sharpen(sample_t s, sample_t blur, sample_t wide, float amount, float det
     return float4(s.rgb + amount * d * m, s.a);
 }
 
+// Point colour: adjust colours close to a sampled colour (OKLab). target = (L, a, b) of the sample.
+float4 pointColor(sample_t s, float3 target, float range, float3 shift)
+{
+    float3 lab = linearToOklab(srgbToLinear(s.rgb));
+    float C = length(lab.yz), tC = length(target.yz);
+    float h = atan2(lab.z, lab.y), th = atan2(target.z, target.y);
+    float dh = abs(h - th);
+    dh = min(dh, 6.2831853 - dh) * 57.29578;                  // degrees
+    float hueW = 1.0 - smoothstep(range * 0.35, range * 0.35 + 18.0, dh);
+    float chromaW = smoothstep(0.015, 0.05, C) * (1.0 - smoothstep(tC * 2.5 + 0.05, tC * 3.0 + 0.12, C));
+    float lumW = 1.0 - smoothstep(0.15 + range * 0.004, 0.3 + range * 0.006, abs(lab.x - target.x));
+    float w = hueW * chromaW * lumW;
+    if (w <= 0.0) return s;
+    float nh = h + shift.x * 0.6 * w;                           // hue shift (radians, ~±35°)
+    float nC = C * max(0.0, 1.0 + shift.y * w);
+    float nL = lab.x + shift.z * 0.2 * w;
+    float3 o = linearToSrgb(oklabToLinear(float3(nL, nC * cos(nh), nC * sin(nh))));
+    return float4(o, s.a);
+}
+
 // Black & white preview of where sharpening is applied (white = sharpened).
 float4 sharpenMask(sample_t s, sample_t blur, sample_t wide, float masking)
 {

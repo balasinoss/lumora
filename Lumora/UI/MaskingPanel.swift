@@ -16,6 +16,10 @@ struct MaskingPanel: View {
 
     var maskList: some View {
         PanelScroll {
+            if model.drawingObject {
+                Text("Draw a box around the object on the photo — the AI selects it exactly.")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.accent).frame(maxWidth: .infinity, alignment: .leading)
+            }
             if let e = model.maskError {
                 Text(e).font(.system(size: 12)).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -55,8 +59,25 @@ struct MaskingPanel: View {
                     ForEach(0..<min(n, 4), id: \.self) { i in addButton(.person, personIndex: i, title: "Person \(i + 1)") }
                 }
             }
+            SectionTitle(text: "Face")
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 98), spacing: 8)], spacing: 8) {
+                addButton(.faceSkin)
+                addButton(.eyes)
+                addButton(.lips)
+                addButton(.teeth)
+            }
             SectionTitle(text: "Manual masks")
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 98), spacing: 8)], spacing: 8) {
+                Button { model.drawingObject = true } label: {
+                    VStack(spacing: 6) {
+                        Image(systemName: MaskKind.object.icon).font(.system(size: 20))
+                        Text("Object").font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundStyle(model.drawingObject ? .black : .white)
+                    .frame(maxWidth: .infinity).padding(.vertical, 12)
+                    .background(model.drawingObject ? AnyShapeStyle(Theme.gradient) : AnyShapeStyle(Theme.panel2), in: RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.stroke))
+                }
                 addButton(.brush)
                 addButton(.linear)
                 addButton(.radial)

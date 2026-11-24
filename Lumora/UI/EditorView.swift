@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 enum EditorTool: String, CaseIterable, Identifiable {
-    case profiles = "Looks", crop = "Crop", masking = "Masks", light = "Light", color = "Color", effects = "Effects",
+    case profiles = "Presets", crop = "Crop", masking = "Masks", heal = "Heal", light = "Light", color = "Color", effects = "Effects",
          detail = "Detail", optics = "Optics", geometry = "Geometry"
     var id: String { rawValue }
     var icon: String {
@@ -10,6 +10,7 @@ enum EditorTool: String, CaseIterable, Identifiable {
         case .profiles: return "square.stack.3d.up"
         case .crop: return "crop.rotate"
         case .masking: return "circle.lefthalf.filled.righthalf.striped.horizontal"
+        case .heal: return "bandage"
         case .light: return "sun.max"
         case .color: return "thermometer.medium"
         case .effects: return "sparkles"
@@ -40,20 +41,44 @@ struct EditorView: View {
     @State private var pan: CGSize = .zero
     @State private var panBase: CGSize = .zero
     @State private var panelExpanded = false
+    @State private var fullscreen = false
+    @State private var splitMode = false
+    @State private var split: CGFloat = 0.5
+    @State private var splitStart: CGFloat?
+    @State private var holdWork: DispatchWorkItem?
+    @State private var showHistory = false
+    @State private var showVersions = false
 
     init(item: PhotoItem) { _model = StateObject(wrappedValue: EditorModel(item: item)) }
 
     var body: some View {
         VStack(spacing: 0) {
-            topBar
+            if !fullscreen { topBar.transition(.move(edge: .top).combined(with: .opacity)) }
             imageArea
-            panelContainer
-            toolBar
+            if !fullscreen {
+                panelContainer.transition(.move(edge: .bottom).combined(with: .opacity))
+                toolBar.transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
-        .background(Theme.bg.ignoresSafeArea())
+        .background((fullscreen ? Color.black : Theme.bg).ignoresSafeArea())
+        .statusBarHidden(fullscreen)
+        .overlay(alignment: .topTrailing) {
+            if fullscreen {
+                Button { withAnimation(.easeInOut(duration: 0.25)) { fullscreen = false } } label: {
+                    Image(systemName: "arrow.down.right.and.arrow.up.left").font(.system(size: 15, weight: .semibold))
+                        .frame(width: 40, height: 40).background(.ultraThinMaterial, in: Circle())
+                }
+                .foregroundStyle(.white).padding(16)
+            }
+        }
+        .sheet(isPresented: $showHistory) { HistorySheet(model: model).presentationDetents([.medium, .large]) }
+        .sheet(isPresented: $showVersions) { VersionsSheet(model: model).presentationDetents([.medium, .large]) }
         .onChange(of: tool) { _, t in
             model.cropMode = (t == .crop)
-            model.maskMode = (t == .masking)
+            model.maskMode = (t == .masking || t == .heal)
+            if t != .masking { model.drawingObject = false }
+            if t != .profiles { model.clearPresetSession() }
+            if t != .color { model.pickingColor = false }
             if t != .light { model.curveEditing = false }
             if t != .detail { model.showSharpenMask = false }
             if t != .masking { model.brushMode = .off }
@@ -74,13 +99,17 @@ struct EditorView: View {
             Group {
                 Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!model.canUndo)
                 Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward") }.disabled(!model.canRedo)
-                Button { showHistogram.toggle() } label: { Image(systemName: "chart.bar.xaxis").foregroundStyle(showHistogram ? Theme.accent : .white) }
-                Image(systemName: "square.split.2x1")
-                    .foregroundStyle(showOriginal ? Theme.accent : .white)
-                    .gesture(DragGesture(minimumDistance: 0)
-                        .onChanged { _ in if !showOriginal { model.loadOriginal(); showOriginal = true } }
-                        .onEnded { _ in showOriginal = false })
+                Button { splitMode.toggle(); if splitMode { model.loadOriginal() } } label: {
+                    Image(systemName: "square.split.2x1").foregroundStyle(splitMode ? Theme.accent : .white)
+                }
+                Button { withAnimation(.easeInOut(duration: 0.25)) { fullscreen = true } } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                }
                 Menu {
+                    Button { showHistogram.toggle() } label: { Label(showHistogram ? "Hide Histogram" : "Show Histogram", systemImage: "chart.bar.xaxis") }
+                    Button { showHistory = true } label: { Label("History", systemImage: "clock.arrow.circlepath") }
+                    Button { showVersions = true } label: { Label("Versions", systemImage: "square.on.square") }
+                    Divider()
                     Button { LibraryStore.shared.clipboard = model.settings } label: { Label("Copy Settings", systemImage: "doc.on.doc") }
                     if let c = LibraryStore.shared.clipboard {
                         Button { model.edit { s in
@@ -108,7 +137,7 @@ struct EditorView: View {
         GeometryReader { geo in
             ZStack {
                 Theme.bg
-                if let img = (showOriginal ? (model.original ?? model.preview) : model.preview) {
+                if let img = ((showOriginal && tool != .crop && tool != .masking && tool != .heal) ? (model.original ?? model.preview) : model.preview) {
                     if tool == .crop {
                         CropOverlay(model: model, image: img, container: geo.size)
                     } else if tool == .masking || model.curveEditing {
@@ -119,34 +148,24 @@ struct EditorView: View {
                         } else {
                             CurveOverlay(model: model, rect: r)
                         }
+                    } else if tool == .heal {
+                        let r = fitRect(img.size, in: geo.size, inset: 8)
+                        Image(uiImage: img).resizable().frame(width: r.width, height: r.height).position(x: r.midX, y: r.midY)
+                        HealCanvas(model: model, rect: r)
                     } else {
-                        Image(uiImage: img)
-                            .resizable().scaledToFit()
-                            .padding(8)
-                            .scaleEffect(zoom)
-                            .offset(pan)
-                            .gesture(MagnificationGesture()
-                                .onChanged { zoom = max(1, min(8, zoomBase * $0)) }
-                                .onEnded { _ in zoomBase = zoom; if zoom <= 1.01 { pan = .zero; panBase = .zero } })
-                            .simultaneousGesture(DragGesture()
-                                .onChanged { g in if zoom > 1 { pan = CGSize(width: panBase.width + g.translation.width, height: panBase.height + g.translation.height) } }
-                                .onEnded { _ in panBase = pan })
-                            .onTapGesture(count: 2) {
-                                withAnimation(.easeOut(duration: 0.2)) {
-                                    if zoom > 1 { zoom = 1; zoomBase = 1; pan = .zero; panBase = .zero } else { zoom = 2.5; zoomBase = 2.5 }
-                                }
-                            }
+                        mainImage(img, container: geo.size)
                     }
                 } else {
                     ProgressView().tint(Theme.accent)
                 }
                 VStack {
                     HStack(alignment: .top) {
-                        if showOriginal { badge("Original") }
+                        if showOriginal { badge("Before") }
+                        if model.pickingColor { badge("Tap the photo to pick a color") }
                         if model.showSharpenMask { badge("Sharpening mask · white = sharpened") }
                         if let busy = model.maskBusy { badge(busy, spinner: true) }
                         Spacer()
-                        if showHistogram && tool != .crop && !model.histogram.isEmpty {
+                        if showHistogram && !fullscreen && tool != .crop && !model.histogram.isEmpty {
                             HistogramView(data: model.histogram).frame(width: 120, height: 58).allowsHitTesting(false)
                         }
                     }
@@ -156,6 +175,71 @@ struct EditorView: View {
             .coordinateSpace(name: "maskcanvas")
             .clipped()
         }
+    }
+
+    /// The photo with zoom, tap (full screen), double-tap (zoom), press-and-hold (original) and split view.
+    @ViewBuilder func mainImage(_ img: UIImage, container: CGSize) -> some View {
+        let r = fitRect(img.size, in: container, inset: fullscreen ? 0 : 8)
+        ZStack {
+            Image(uiImage: img).resizable().frame(width: r.width, height: r.height)
+            if splitMode, let orig = model.original {
+                Image(uiImage: orig).resizable().frame(width: r.width, height: r.height)
+                    .mask(alignment: .leading) { Rectangle().frame(width: r.width * split) }
+                Rectangle().fill(.white).frame(width: 2, height: r.height)
+                    .offset(x: r.width * (split - 0.5))
+                    .shadow(color: .black.opacity(0.5), radius: 2)
+                Circle().fill(.white).frame(width: 30, height: 30)
+                    .overlay(Image(systemName: "arrow.left.and.right").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
+                    .offset(x: r.width * (split - 0.5))
+                    .gesture(DragGesture()
+                        .onChanged { g in
+                            if splitStart == nil { splitStart = split }
+                            split = min(max(splitStart! + g.translation.width / r.width, 0.02), 0.98)
+                        }
+                        .onEnded { _ in splitStart = nil })
+                Text("Before").font(.system(size: 10, weight: .bold)).padding(5).background(.black.opacity(0.5), in: Capsule())
+                    .offset(x: -r.width / 2 + 34, y: -r.height / 2 + 16)
+                Text("After").font(.system(size: 10, weight: .bold)).padding(5).background(.black.opacity(0.5), in: Capsule())
+                    .offset(x: r.width / 2 - 30, y: -r.height / 2 + 16)
+            }
+        }
+        .scaleEffect(zoom)
+        .offset(pan)
+        .position(x: r.midX + 0, y: r.midY)
+        .contentShape(Rectangle())
+        .gesture(MagnificationGesture()
+            .onChanged { zoom = max(1, min(8, zoomBase * $0)) }
+            .onEnded { _ in zoomBase = zoom; if zoom <= 1.01 { pan = .zero; panBase = .zero } })
+        .simultaneousGesture(DragGesture()
+            .onChanged { g in if zoom > 1 { pan = CGSize(width: panBase.width + g.translation.width, height: panBase.height + g.translation.height) } }
+            .onEnded { _ in panBase = pan })
+        .onTapGesture(count: 2) {
+            withAnimation(.easeOut(duration: 0.2)) {
+                if zoom > 1 { zoom = 1; zoomBase = 1; pan = .zero; panBase = .zero } else { zoom = 2.5; zoomBase = 2.5 }
+            }
+        }
+        .onTapGesture(count: 1, coordinateSpace: .named("maskcanvas")) { loc in
+            if model.pickingColor {
+                let p = CGPoint(x: (loc.x - r.minX) / r.width, y: (loc.y - r.minY) / r.height)
+                if p.x >= 0, p.y >= 0, p.x <= 1, p.y <= 1 { model.pickColor(at: p) }
+            } else if !splitMode {
+                withAnimation(.easeInOut(duration: 0.25)) { fullscreen.toggle() }
+            }
+        }
+        .onLongPressGesture(minimumDuration: 0.15, maximumDistance: 12, perform: {}, onPressingChanged: { pressing in
+            holdWork?.cancel()
+            if pressing {
+                let w = DispatchWorkItem {
+                    model.loadOriginal()
+                    showOriginal = true
+                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                }
+                holdWork = w
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: w)
+            } else {
+                showOriginal = false
+            }
+        })
     }
 
     func badge(_ text: String, spinner: Bool = false) -> some View {
@@ -174,7 +258,7 @@ struct EditorView: View {
             Capsule().fill(Color.white.opacity(0.25)).frame(width: 36, height: 4).padding(.top, 7)
                 .onTapGesture { withAnimation(.spring(duration: 0.3)) { panelExpanded.toggle() } }
             HStack {
-                Text(tool == .profiles ? "Looks" : tool.rawValue).font(.system(size: 17, weight: .bold))
+                Text(tool.rawValue).font(.system(size: 17, weight: .bold))
                 Spacer()
                 Button { withAnimation(.spring(duration: 0.3)) { panelExpanded.toggle() } } label: {
                     Image(systemName: panelExpanded ? "chevron.down" : "chevron.up").font(.system(size: 13, weight: .semibold))
@@ -198,9 +282,10 @@ struct EditorView: View {
 
     @ViewBuilder var panel: some View {
         switch tool {
-        case .profiles: ProfilesPanel(model: model)
+        case .profiles: PresetsPanel(model: model)
         case .crop: CropPanel(model: model)
         case .masking: MaskingPanel(model: model)
+        case .heal: HealPanel(model: model)
         case .light: LightPanel(model: model)
         case .color: ColorPanel(model: model)
         case .effects: EffectsPanel(model: model)
@@ -362,6 +447,8 @@ struct MaskCanvas: View {
     @ObservedObject var model: EditorModel
     let rect: CGRect
     @State private var painting = false
+    @State private var objStart: CGPoint?
+    @State private var objEnd: CGPoint?
 
     func norm(_ p: CGPoint) -> NPoint {
         NPoint(x: Double((p.x - rect.minX) / rect.width), y: Double((p.y - rect.minY) / rect.height))
@@ -370,7 +457,26 @@ struct MaskCanvas: View {
 
     var body: some View {
         ZStack {
-            if let m = model.selectedMask {
+            if model.drawingObject {
+                Color.clear.contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 4)
+                        .onChanged { g in objStart = g.startLocation; objEnd = g.location }
+                        .onEnded { _ in
+                            if let a = objStart, let b = objEnd {
+                                let n0 = norm(a), n1 = norm(b)
+                                let x = max(0, min(n0.x, n1.x)), y = max(0, min(n0.y, n1.y))
+                                let w = min(1 - x, abs(n1.x - n0.x)), h = min(1 - y, abs(n1.y - n0.y))
+                                if w > 0.02 && h > 0.02 { model.addObjectMask(rect: NormRect(x: x, y: y, w: w, h: h)) }
+                            }
+                            objStart = nil; objEnd = nil
+                        })
+                if let a = objStart, let b = objEnd {
+                    Rectangle().stroke(Theme.accent, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                        .frame(width: abs(b.x - a.x), height: abs(b.y - a.y))
+                        .position(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+                        .allowsHitTesting(false)
+                }
+            } else if let m = model.selectedMask {
                 if model.brushMode != .off {
                     Color.clear.contentShape(Rectangle())
                         .gesture(DragGesture(minimumDistance: 0)
@@ -429,5 +535,61 @@ struct MaskCanvas: View {
             .padding(12).contentShape(Circle())
             .position(p)
             .gesture(DragGesture(coordinateSpace: .named("maskcanvas")).onChanged { g in move(g.location) }.onEnded { _ in model.commit() })
+    }
+}
+
+
+// MARK: - Heal canvas
+
+struct HealCanvas: View {
+    @ObservedObject var model: EditorModel
+    let rect: CGRect
+    @State private var dragging: (UUID, Bool)?   // (spot, isSource)
+    @State private var start: (Double, Double)?
+
+    func view(_ x: Double, _ y: Double) -> CGPoint { CGPoint(x: rect.minX + CGFloat(x) * rect.width, y: rect.minY + CGFloat(y) * rect.height) }
+
+    var body: some View {
+        let short = min(rect.width, rect.height)
+        ZStack {
+            Color.clear.contentShape(Rectangle())
+                .onTapGesture(coordinateSpace: .named("maskcanvas")) { loc in
+                    let p = CGPoint(x: (loc.x - rect.minX) / rect.width, y: (loc.y - rect.minY) / rect.height)
+                    guard p.x >= 0, p.y >= 0, p.x <= 1, p.y <= 1 else { return }
+                    model.addHeal(at: p)
+                }
+            ForEach(model.settings.healSpots) { sp in
+                let d = view(sp.x, sp.y), s = view(sp.srcX, sp.srcY)
+                let rr = CGFloat(sp.radius) * short
+                let sel = sp.id == model.selectedHealID
+                Path { p in p.move(to: s); p.addLine(to: d) }.stroke(Color.white.opacity(sel ? 0.8 : 0.3), lineWidth: 1).allowsHitTesting(false)
+                Circle().stroke(Color.white.opacity(sel ? 1 : 0.5), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                    .frame(width: rr * 2, height: rr * 2).contentShape(Circle()).position(s)
+                    .gesture(drag(sp, source: true))
+                Circle().stroke(sel ? Theme.accent : Color.white.opacity(0.7), lineWidth: 2)
+                    .background(Circle().fill(Color.white.opacity(0.001)))
+                    .frame(width: rr * 2, height: rr * 2).contentShape(Circle()).position(d)
+                    .gesture(drag(sp, source: false))
+                    .onTapGesture { model.selectedHealID = sp.id }
+            }
+        }
+    }
+
+    func drag(_ sp: HealSpot, source: Bool) -> some Gesture {
+        DragGesture(minimumDistance: 2, coordinateSpace: .named("maskcanvas"))
+            .onChanged { g in
+                model.selectedHealID = sp.id
+                if start == nil { start = source ? (sp.srcX, sp.srcY) : (sp.x, sp.y) }
+                guard let st = start else { return }
+                let nx = min(max(st.0 + Double(g.translation.width / rect.width), 0), 1)
+                let ny = min(max(st.1 + Double(g.translation.height / rect.height), 0), 1)
+                model.updateHeal { h in
+                    if source { h.srcX = nx; h.srcY = ny } else {
+                        let dx = nx - h.x, dy = ny - h.y
+                        h.x = nx; h.y = ny; h.srcX += dx; h.srcY += dy
+                    }
+                }
+            }
+            .onEnded { _ in start = nil; model.refreshHealShift(); model.commit() }
     }
 }
