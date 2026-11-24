@@ -22,39 +22,21 @@ struct LSlider: View {
     private var span: Double { range.upperBound - range.lowerBound }
     private func frac(_ v: Double) -> CGFloat { CGFloat((min(max(v, range.lowerBound), range.upperBound) - range.lowerBound) / span) }
     private var changed: Bool { abs(value - defaultValue) > step / 2 }
+    private var valueColor: Color {
+        if active { return Theme.accent }
+        return changed ? Color.white : Theme.text2
+    }
 
     var body: some View {
         VStack(spacing: 7) {
             HStack {
                 Text(label).font(.system(size: 13, weight: changed ? .semibold : .regular))
-                    .foregroundStyle(changed ? .white : Color(white: 0.78))
+                    .foregroundStyle(changed ? Color.white : Color(white: 0.78))
                 Spacer()
                 Text(format(value)).font(.system(size: 13, weight: .medium).monospacedDigit())
-                    .foregroundStyle(active ? Theme.accent : (changed ? .white : Theme.text2))
+                    .foregroundStyle(valueColor)
             }
-            GeometryReader { geo in
-                let w = geo.size.width
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(gradient.map { AnyShapeStyle(LinearGradient(colors: $0, startPoint: .leading, endPoint: .trailing)) } ?? AnyShapeStyle(Color.white.opacity(0.14)))
-                        .frame(height: gradient == nil ? 3 : 4)
-                    if gradient == nil {
-                        let a = frac(defaultValue), b = frac(value)
-                        Capsule().fill(Theme.gradient)
-                            .frame(width: max(0, abs(b - a) * w), height: 3)
-                            .offset(x: min(a, b) * w)
-                    }
-                    if defaultValue > range.lowerBound && defaultValue < range.upperBound {
-                        Capsule().fill(Color.white.opacity(0.35)).frame(width: 2, height: 8).offset(x: frac(defaultValue) * w - 1)
-                    }
-                    Circle().fill(.white)
-                        .frame(width: active ? 22 : 16, height: active ? 22 : 16)
-                        .shadow(color: .black.opacity(0.5), radius: 3, y: 1)
-                        .offset(x: frac(value) * w - (active ? 11 : 8))
-                        .animation(.easeOut(duration: 0.12), value: active)
-                }
-                .frame(height: 22)
-            }
+            SliderTrack(value: value, defaultValue: defaultValue, range: range, gradient: gradient, active: active)
             .frame(height: 22)
         }
         .padding(.vertical, 5)
@@ -78,6 +60,53 @@ struct LSlider: View {
                     onCommit()
                 })
         )
+    }
+}
+
+struct SliderTrack: View {
+    let value: Double
+    let defaultValue: Double
+    let range: ClosedRange<Double>
+    let gradient: [Color]?
+    let active: Bool
+
+    private func frac(_ v: Double) -> CGFloat {
+        let span = range.upperBound - range.lowerBound
+        let c = min(max(v, range.lowerBound), range.upperBound)
+        return CGFloat((c - range.lowerBound) / span)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let w: CGFloat = geo.size.width
+            let a: CGFloat = frac(defaultValue)
+            let b: CGFloat = frac(value)
+            let knob: CGFloat = active ? 22 : 16
+            ZStack(alignment: .leading) {
+                trackBackground
+                if gradient == nil {
+                    Capsule().fill(Theme.gradient)
+                        .frame(width: max(0, abs(b - a) * w), height: 3)
+                        .offset(x: min(a, b) * w)
+                }
+                if defaultValue > range.lowerBound && defaultValue < range.upperBound {
+                    Capsule().fill(Color.white.opacity(0.35)).frame(width: 2, height: 8).offset(x: a * w - 1)
+                }
+                Circle().fill(Color.white)
+                    .frame(width: knob, height: knob)
+                    .shadow(color: Color.black.opacity(0.5), radius: 3, y: 1)
+                    .offset(x: b * w - knob / 2)
+            }
+            .frame(height: 22)
+        }
+    }
+
+    @ViewBuilder var trackBackground: some View {
+        if let g = gradient {
+            Capsule().fill(SwiftUI.LinearGradient(colors: g, startPoint: .leading, endPoint: .trailing)).frame(height: 4)
+        } else {
+            Capsule().fill(Color.white.opacity(0.14)).frame(height: 3)
+        }
     }
 }
 

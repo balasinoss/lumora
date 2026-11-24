@@ -44,12 +44,12 @@ struct BrushStroke: Codable, Equatable {
     var erase: Bool = false
 }
 
-struct LinearGradient: Codable, Equatable {
+struct MaskLinearGradient: Codable, Equatable {
     var start = NPoint(x: 0.5, y: 0.25)   // fully masked side
     var end = NPoint(x: 0.5, y: 0.6)      // fully unmasked side
 }
 
-struct RadialGradient: Codable, Equatable {
+struct MaskRadialGradient: Codable, Equatable {
     var center = NPoint(x: 0.5, y: 0.5)
     var radiusX: Double = 0.25            // fraction of width
     var radiusY: Double = 0.25            // fraction of height
@@ -84,8 +84,8 @@ struct MaskLayer: Codable, Equatable, Identifiable {
     var invert = false
     var opacity: Double = 100
     var visible = true
-    var linear: LinearGradient? = nil
-    var radial: RadialGradient? = nil
+    var linear: MaskLinearGradient? = nil
+    var radial: MaskRadialGradient? = nil
     /// Brush strokes refine any mask (add or erase). A Brush mask is made only of strokes.
     var strokes: [BrushStroke] = []
     var adjust = LocalAdjust()
@@ -94,7 +94,7 @@ struct MaskLayer: Codable, Equatable, Identifiable {
         self.kind = kind
         self.name = name ?? kind.title
         self.personIndex = personIndex
-        if kind == .linear { linear = LinearGradient() }
-        if kind == .radial { radial = RadialGradient() }
+        if kind == .linear { linear = MaskLinearGradient() }
+        if kind == .radial { radial = MaskRadialGradient() }
     }
 }

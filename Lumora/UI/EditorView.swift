@@ -215,19 +215,9 @@ struct EditorView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 2) {
                     ForEach(EditorTool.allCases) { t in
-                        Button {
+                        ToolButton(tool: t, selected: tool == t) {
                             withAnimation(.easeOut(duration: 0.15)) { tool = t }
                             proxy.scrollTo(t.id, anchor: .center)
-                        } label: {
-                            VStack(spacing: 5) {
-                                Image(systemName: t.icon).font(.system(size: 18, weight: .medium))
-                                    .frame(width: 44, height: 30)
-                                    .background(tool == t ? AnyShapeStyle(Theme.gradient) : AnyShapeStyle(Color.clear), in: Capsule())
-                                    .foregroundStyle(tool == t ? .black : .white)
-                                Text(t.rawValue).font(.system(size: 10, weight: tool == t ? .bold : .medium))
-                                    .foregroundStyle(tool == t ? .white : Theme.text2)
-                            }
-                            .frame(width: 62)
                         }
                         .id(t.id)
                     }
@@ -236,6 +226,25 @@ struct EditorView: View {
         }
         .padding(.top, 8).padding(.bottom, 4)
         .background(Theme.bg)
+    }
+}
+
+struct ToolButton: View {
+    let tool: EditorTool
+    let selected: Bool
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 5) {
+                Image(systemName: tool.icon).font(.system(size: 18, weight: .medium))
+                    .frame(width: 44, height: 30)
+                    .background(selected ? AnyShapeStyle(Theme.gradient) : AnyShapeStyle(Color.clear), in: Capsule())
+                    .foregroundStyle(selected ? Color.black : Color.white)
+                Text(tool.rawValue).font(.system(size: 10, weight: selected ? .bold : .medium))
+                    .foregroundStyle(selected ? Color.white : Theme.text2)
+            }
+            .frame(width: 62)
+        }
     }
 }
 
@@ -353,7 +362,6 @@ struct MaskCanvas: View {
     @ObservedObject var model: EditorModel
     let rect: CGRect
     @State private var painting = false
-    @State private var dragStart: (LinearGradient?, RadialGradient?)? = nil
 
     func norm(_ p: CGPoint) -> NPoint {
         NPoint(x: Double((p.x - rect.minX) / rect.width), y: Double((p.y - rect.minY) / rect.height))
@@ -380,7 +388,7 @@ struct MaskCanvas: View {
         }
     }
 
-    @ViewBuilder func linearHandles(_ g: LinearGradient) -> some View {
+    @ViewBuilder func linearHandles(_ g: MaskLinearGradient) -> some View {
         let a = view(g.start), b = view(g.end)
         Path { p in p.move(to: a); p.addLine(to: b) }.stroke(.white, style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
         // lines perpendicular to the direction at both ends
@@ -403,7 +411,7 @@ struct MaskCanvas: View {
         }
     }
 
-    @ViewBuilder func radialHandles(_ g: RadialGradient) -> some View {
+    @ViewBuilder func radialHandles(_ g: MaskRadialGradient) -> some View {
         let c = view(g.center)
         let rx = CGFloat(g.radiusX) * rect.width, ry = CGFloat(g.radiusY) * rect.height
         Ellipse().stroke(.white, lineWidth: 1.5).frame(width: rx * 2, height: ry * 2).position(c).allowsHitTesting(false)
