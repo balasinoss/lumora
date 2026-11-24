@@ -341,8 +341,15 @@ enum LightroomImport {
             while i + 1 < nums.count { pts.append([nums[i] / 255, nums[i + 1] / 255]); i += 2 }
             return pts.sorted { $0[0] < $1[0] }
         }
-        let parametric = [num("ParametricShadows") ?? 0, num("ParametricDarks") ?? 0, num("ParametricLights") ?? 0, num("ParametricHighlights") ?? 0]
-        let splits = [(num("ParametricShadowSplit") ?? 25) / 100, (num("ParametricMidtoneSplit") ?? 50) / 100, (num("ParametricHighlightSplit") ?? 75) / 100]
+        let pShadows: Double = num("ParametricShadows") ?? 0
+        let pDarks: Double = num("ParametricDarks") ?? 0
+        let pLights: Double = num("ParametricLights") ?? 0
+        let pHighlights: Double = num("ParametricHighlights") ?? 0
+        let parametric: [Double] = [pShadows, pDarks, pLights, pHighlights]
+        let sShadow: Double = (num("ParametricShadowSplit") ?? 25) / 100
+        let sMid: Double = (num("ParametricMidtoneSplit") ?? 50) / 100
+        let sHigh: Double = (num("ParametricHighlightSplit") ?? 75) / 100
+        let splits: [Double] = [sShadow, sMid, sHigh]
         let master = points("ToneCurvePV2012") ?? points("ToneCurve")
         if parametric.contains(where: { $0 != 0 }) || master != nil {
             let mPts = (master ?? [[0, 0], [1, 1]]).map { CurvePoint(x: $0[0], y: $0[1]) }
