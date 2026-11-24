@@ -31,6 +31,26 @@ jobs:
           cp /tmp/lensfun/data/db/*.xml Lumora/Resources/LensfunDB/
           ls Lumora/Resources/LensfunDB | wc -l
 
+      - name: Cache AI models
+        uses: actions/cache@v4
+        with:
+          path: |
+            Lumora/Models
+            ~/.lumora-model-cache
+          key: models-v1-${{ hashFiles('scripts/convert_models.py') }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build AI models (Denoise, Sky, MobileCLIP)
+        run: |
+          if [ ! -d Lumora/Models/Denoiser.mlpackage ] || [ ! -d Lumora/Models/SkySegmenter.mlpackage ] || [ ! -d Lumora/Models/ClipText.mlpackage ]; then
+            pip install -q "torch==2.4.1" "coremltools==8.1" "transformers==4.44.2" "huggingface_hub>=0.24" "numpy<2" 2>&1 | tail -3
+            python scripts/convert_models.py Lumora/Models 2>&1 | tee models.log
+          fi
+          ls -la Lumora/Models
+
       - name: Generate app icon
         run: python3 scripts/make_icon.py Lumora/Assets.xcassets/AppIcon.appiconset/icon-1024.png
 
@@ -64,6 +84,10 @@ jobs:
             echo "Commit: ${GITHUB_SHA}"
             echo '```'
             grep -E "error:|fatal error|Undefined symbol|ld:" build.log | sort -u | head -150 || true
+            echo '```'
+            echo 'Models:'
+            echo '```'
+            tail -40 models.log 2>/dev/null || true
             echo '```'
             echo '<details><summary>Log tail</summary>'
             echo ''

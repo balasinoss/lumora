@@ -22,6 +22,11 @@ final class RenderPipeline {
         var aperture: Double = 0
         var imageCrop: Double? = nil
         var averageColor: [Double] = [0.18, 0.18, 0.18]
+        var itemDir: URL? = nil
+        /// Show this mask as a red overlay (masking tool)
+        var overlayMask: UUID? = nil
+        /// Show the sharpening mask in black & white (Detail → Masking)
+        var sharpenMaskPreview = false
     }
 
     static func info(for source: PhotoSource, settings: EditSettings, pixelScale: CGFloat) -> Info {
@@ -31,6 +36,7 @@ final class RenderPipeline {
         i.focal = source.focalLength
         i.aperture = source.aperture
         i.imageCrop = source.cropFactor
+        i.itemDir = source.url.deletingLastPathComponent()
         if settings.enableLensCorrection || settings.removeChromaticAberration {
             if let id = settings.lensProfileID { i.lens = LensDatabase.shared.lens(id: id) }
             else { i.lens = LensDatabase.shared.match(lensModel: source.lensModel, lensMake: source.lensMake, cameraMake: source.cameraMake) }
@@ -152,8 +158,26 @@ final class RenderPipeline {
                 s.gradeBlending / 100, s.gradeBalance / 100]) ?? img
         }
 
+        // 11b. Masks (local adjustments)
+        if let dir = info.itemDir, !s.masks.isEmpty {
+            for layer in s.masks where layer.visible && !layer.adjust.isNeutral {
+                let m = MaskEngine.shared.image(for: layer, itemDir: dir, extent: img.extent)
+                let local = MaskEngine.shared.applyLocal(img, layer.adjust, pixelScale: px)
+                img = local.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: img, kCIInputMaskImageKey: m])
+                    .cropped(to: E0)
+            }
+            if let id = info.overlayMask, let layer = s.masks.first(where: { $0.id == id }) {
+                let m = MaskEngine.shared.image(for: layer, itemDir: dir, extent: img.extent)
+                img = Kernels.maskOverlay.apply(extent: img.extent, arguments: [img, m, 1.0]) ?? img
+            }
+        }
+
         // 12. Sharpening
-        if s.sharpening > 0 {
+        if info.sharpenMaskPreview {
+            let b = img.lumoraBlur(max(0.5, s.sharpenRadius * px))
+            let wide = img.lumoraBlur(max(1.5, 3 * px))
+            img = Kernels.sharpenMask.apply(extent: img.extent, arguments: [img, b, wide, s.sharpenMasking / 100]) ?? img
+        } else if s.sharpening > 0 {
             let b = img.lumoraBlur(max(0.5, s.sharpenRadius * px))
             let wide = img.lumoraBlur(max(1.5, 3 * px))
             img = Kernels.sharpen.apply(extent: img.extent, arguments: [img, b, wide, s.sharpening / 100 * 1.8, s.sharpenDetail / 100, s.sharpenMasking / 100]) ?? img
@@ -166,12 +190,12 @@ final class RenderPipeline {
         let E = img.extent
 
         // 14. Post-crop vignette & grain
-        if s.vignette != 0 {
+        if s.vignette != 0 && !info.sharpenMaskPreview {
             img = Kernels.vignette.apply(extent: E, arguments: [img,
                 CIVector(x: E.midX, y: E.midY), CIVector(x: E.width / 2, y: E.height / 2),
                 s.vignette / 100, s.vignetteMidpoint / 100, s.vignetteRoundness / 100, s.vignetteFeather / 100, s.vignetteHighlights / 100]) ?? img
         }
-        if s.grain > 0 {
+        if s.grain > 0 && !info.sharpenMaskPreview {
             let size = max(1, (1 + s.grainSize / 100 * 3) * px)
             var noise = CIFilter(name: "CIRandomGenerator")!.outputImage!
                 .transformed(by: CGAffineTransform(scaleX: size, y: size))
@@ -311,6 +335,14 @@ final class RenderPipeline {
             out = out.cropped(to: r)
         }
         return out.transformed(by: CGAffineTransform(translationX: -out.extent.origin.x, y: -out.extent.origin.y))
+    }
+
+    /// Image in the original photo's frame (no crop / geometry / rotation), used by the masking tool.
+    func processUnframed(_ base: CIImage, settings: EditSettings, info: Info) -> CIImage {
+        var s = settings
+        s.crop = .full; s.straighten = 0; s.rotation90 = 0; s.flipH = false; s.flipV = false
+        s.vertical = 0; s.horizontal = 0; s.rotate = 0; s.aspect = 0; s.scale = 100; s.offsetX = 0; s.offsetY = 0
+        return process(base, settings: s, info: info)
     }
 
     /// Image before crop/straighten, used by the crop tool.

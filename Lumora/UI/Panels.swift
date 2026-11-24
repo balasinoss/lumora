@@ -41,17 +41,35 @@ struct ProfilesPanel: View {
 
 struct LightPanel: View {
     @ObservedObject var model: EditorModel
-    @State private var showCurve = false
     var body: some View {
         PanelScroll {
             HStack {
-                Picker("", selection: $showCurve) { Text("Sliders").tag(false); Text("Curve").tag(true) }
-                    .pickerStyle(.segmented).frame(width: 180)
+                Picker("", selection: $model.curveEditing) { Text("Sliders").tag(false); Text("Curve").tag(true) }
+                    .pickerStyle(.segmented).frame(width: 190)
                 Spacer()
-                Button("Auto") { model.autoTone() }.buttonStyle(.bordered)
+                Button { model.autoTone() } label: {
+                    Label("Auto", systemImage: "wand.and.rays").font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 12).padding(.vertical, 7).background(Theme.panel2, in: Capsule())
+                }
             }
-            if showCurve {
-                CurveEditor(model: model)
+            if model.curveEditing {
+                HStack(spacing: 8) {
+                    ForEach(CurveChannel.allCases) { c in
+                        Chip(title: c.rawValue, selected: model.curveChannel == c) { model.curveChannel = c }
+                    }
+                    Spacer()
+                    Button { model.edit { $0.setCurve(model.curveChannel, EditSettings.identityCurve) } } label: {
+                        Image(systemName: "arrow.counterclockwise").frame(width: 34, height: 34).background(Theme.panel2, in: Circle())
+                    }
+                }.padding(.top, 10)
+                Text("Drag on the photo to shape the curve. Touch anywhere to add a point, drag a point to move it, tap a point quickly to remove it.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.text2).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+                HStack(spacing: 8) {
+                    presetButton("Linear", EditSettings.identityCurve)
+                    presetButton("Soft S", [CurvePoint(x: 0, y: 0), CurvePoint(x: 0.25, y: 0.21), CurvePoint(x: 0.75, y: 0.79), CurvePoint(x: 1, y: 1)])
+                    presetButton("Strong S", [CurvePoint(x: 0, y: 0), CurvePoint(x: 0.25, y: 0.17), CurvePoint(x: 0.75, y: 0.84), CurvePoint(x: 1, y: 1)])
+                    presetButton("Fade", [CurvePoint(x: 0, y: 0.08), CurvePoint(x: 0.5, y: 0.52), CurvePoint(x: 1, y: 0.96)])
+                }.padding(.top, 8)
             } else {
                 LSlider(label: "Exposure", value: model.b(\.exposure), range: -5...5, step: 0.01,
                         format: { String(format: "%+.2f", $0) }, onCommit: model.commit)
@@ -62,6 +80,12 @@ struct LightPanel: View {
                 LSlider(label: "Blacks", value: model.b(\.blacks), onCommit: model.commit)
             }
         }
+    }
+
+    func presetButton(_ name: String, _ pts: [CurvePoint]) -> some View {
+        Button(name) { model.edit { $0.setCurve(model.curveChannel, pts) } }
+            .font(.system(size: 12, weight: .medium)).foregroundStyle(.white)
+            .padding(.horizontal, 10).padding(.vertical, 6).background(Theme.panel2, in: Capsule())
     }
 }
 
@@ -231,23 +255,117 @@ struct EffectsPanel: View {
 
 struct DetailPanel: View {
     @ObservedObject var model: EditorModel
+    @State private var amount: Double = 50
+    @State private var preview: (UIImage, UIImage)?
+    @State private var previewing = false
+    @State private var showAfter = true
     func n(_ v: Double) -> String { "\(Int(v.rounded()))" }
+
     var body: some View {
         PanelScroll {
+            denoiseCard
             SectionTitle(text: "Sharpening")
-            LSlider(label: "Amount", value: model.b(\.sharpening), range: 0...150, defaultValue: model.item.isRAW ? 40 : 0, format: n, onCommit: model.commit)
+            LSlider(label: "Amount", value: model.b(\.sharpening), range: 0...150, defaultValue: 0, format: n, onCommit: model.commit)
             LSlider(label: "Radius", value: model.b(\.sharpenRadius), range: 0.5...3, defaultValue: 1, step: 0.1, format: { String(format: "%.1f", $0) }, onCommit: model.commit)
             LSlider(label: "Detail", value: model.b(\.sharpenDetail), range: 0...100, defaultValue: 25, format: n, onCommit: model.commit)
-            LSlider(label: "Masking", value: model.b(\.sharpenMasking), range: 0...100, defaultValue: 0, format: n, onCommit: model.commit)
+            HStack(alignment: .center, spacing: 12) {
+                LSlider(label: "Masking", value: model.b(\.sharpenMasking), range: 0...100, defaultValue: 0, format: n, onCommit: model.commit)
+                Button { model.showSharpenMask.toggle() } label: {
+                    Image(systemName: model.showSharpenMask ? "eye.fill" : "eye")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(model.showSharpenMask ? .black : .white)
+                        .frame(width: 38, height: 38)
+                        .background(model.showSharpenMask ? AnyShapeStyle(Theme.gradient) : AnyShapeStyle(Theme.panel2), in: Circle())
+                }
+                .accessibilityLabel("Show sharpening mask")
+            }
+            if model.showSharpenMask {
+                Text("White areas get sharpened, black areas are protected. Raise Masking to sharpen only edges.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.text2).frame(maxWidth: .infinity, alignment: .leading)
+            }
             SectionTitle(text: "Noise Reduction")
             LSlider(label: "Amount", value: model.b(\.noiseReduction), range: 0...100, defaultValue: 0, format: n, onCommit: model.commit)
             LSlider(label: "Detail", value: model.b(\.noiseDetail), range: 0...100, defaultValue: 50, format: n, onCommit: model.commit)
             LSlider(label: "Contrast", value: model.b(\.noiseContrast), range: 0...100, defaultValue: 0, format: n, onCommit: model.commit)
             SectionTitle(text: "Color Noise Reduction")
-            LSlider(label: "Amount", value: model.b(\.colorNoiseReduction), range: 0...100, defaultValue: model.item.isRAW ? 25 : 0, format: n, onCommit: model.commit)
+            LSlider(label: "Amount", value: model.b(\.colorNoiseReduction), range: 0...100, defaultValue: 0, format: n, onCommit: model.commit)
             LSlider(label: "Detail", value: model.b(\.colorNoiseDetail), range: 0...100, defaultValue: 50, format: n, onCommit: model.commit)
             LSlider(label: "Smoothness", value: model.b(\.colorNoiseSmoothness), range: 0...100, defaultValue: 50, format: n, onCommit: model.commit)
         }
+        .onAppear { amount = model.denoiseApplied ?? model.settings.aiDenoiseAmount }
+        .sheet(isPresented: Binding(get: { preview != nil }, set: { if !$0 { preview = nil } })) {
+            if let preview { denoisePreview(preview) }
+        }
+    }
+
+    var denoiseCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "wand.and.stars").foregroundStyle(Theme.accent)
+                Text("AI Denoise").font(.system(size: 15, weight: .bold))
+                Spacer()
+                if let a = model.denoiseApplied {
+                    Toggle("", isOn: Binding(get: { model.settings.aiDenoise }, set: { v in model.edit { $0.aiDenoise = v } }))
+                        .labelsHidden().tint(Theme.accent)
+                    Text("Applied \(Int(a))").font(.system(size: 11)).foregroundStyle(Theme.text2)
+                }
+            }
+            LSlider(label: "Amount", value: $amount, range: 0...100, defaultValue: 50, format: n)
+            if let p = model.denoiseProgress {
+                ProgressView(value: p) { Text("Denoising… \(Int(p * 100))%").font(.system(size: 12)) }.tint(Theme.accent)
+            } else {
+                HStack {
+                    Button {
+                        previewing = true
+                        let src = model.source, s = model.settings, a = amount
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            let r = src.flatMap { AIDenoise.preview(source: $0, settings: s, amount: a) }
+                            DispatchQueue.main.async { previewing = false; preview = r; if r == nil { model.denoiseError = "Preview failed" } }
+                        }
+                    } label: {
+                        HStack { if previewing { ProgressView().controlSize(.small) }; Text("Preview") }
+                            .font(.system(size: 13, weight: .semibold)).frame(maxWidth: .infinity).padding(.vertical, 9)
+                            .background(Theme.panel2, in: RoundedRectangle(cornerRadius: 10))
+                    }.disabled(previewing)
+                    Button { model.runDenoise(amount: amount) } label: {
+                        Text(model.denoiseApplied == nil ? "Denoise" : "Re-apply")
+                            .font(.system(size: 13, weight: .bold)).foregroundStyle(.black).frame(maxWidth: .infinity).padding(.vertical, 9)
+                            .background(Theme.gradient, in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    if model.denoiseApplied != nil {
+                        Button(role: .destructive) { model.removeDenoise() } label: {
+                            Image(systemName: "trash").frame(width: 38, height: 36).background(Theme.panel2, in: RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                }
+            }
+            if let e = model.denoiseError { Text(e).font(.system(size: 12)).foregroundStyle(.orange) }
+            Text("Runs on the iPhone's Neural Engine at full resolution (can take a minute). Your original stays untouched.")
+                .font(.system(size: 11)).foregroundStyle(Theme.text2)
+        }
+        .padding(14)
+        .background(Theme.panel2.opacity(0.6), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Theme.stroke))
+        .padding(.top, 4)
+    }
+
+    func denoisePreview(_ p: (UIImage, UIImage)) -> some View {
+        VStack(spacing: 14) {
+            Text("AI Denoise preview · 100%").font(.headline).padding(.top)
+            Image(uiImage: showAfter ? p.1 : p.0).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(alignment: .topLeading) {
+                    Text(showAfter ? "After" : "Before").font(.caption.bold()).padding(6).background(.ultraThinMaterial, in: Capsule()).padding(8)
+                }
+                .onLongPressGesture(minimumDuration: 0.01, pressing: { showAfter = !$0 }, perform: {})
+            Text("Press and hold the photo to see the original").font(.footnote).foregroundStyle(Theme.text2)
+            Button { preview = nil; model.runDenoise(amount: amount) } label: {
+                Text("Apply Denoise").bold().foregroundStyle(.black).frame(maxWidth: .infinity).padding(.vertical, 12)
+                    .background(Theme.gradient, in: RoundedRectangle(cornerRadius: 12))
+            }
+            Spacer()
+        }
+        .padding()
+        .presentationDetents([.large])
     }
 }
 

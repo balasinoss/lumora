@@ -348,6 +348,33 @@ float4 sharpen(sample_t s, sample_t blur, sample_t wide, float amount, float det
     return float4(s.rgb + amount * d * m, s.a);
 }
 
+// Black & white preview of where sharpening is applied (white = sharpened).
+float4 sharpenMask(sample_t s, sample_t blur, sample_t wide, float masking)
+{
+    float edge = abs(luma(blur.rgb) - luma(wide.rgb));
+    float m = masking <= 0.0 ? 1.0 : smoothstep(masking * 0.05, masking * 0.05 + 0.03, edge);
+    return float4(m, m, m, 1.0);
+}
+
+// Red overlay showing the selected mask (mask value in mask.r).
+float4 maskOverlay(sample_t s, sample_t mask, float opacity)
+{
+    float m = clamp(mask.r, 0.0, 1.0) * opacity;
+    float3 red = float3(1.0, 0.18, 0.25);
+    return float4(mix(s.rgb, red, m * 0.55), s.a);
+}
+
+// Combine a mask with brush strokes: add = max, erase = multiply by (1 - erase).
+float4 maskCombine(sample_t base, sample_t add, sample_t erase, float invert, float opacity)
+{
+    float m = clamp(base.r, 0.0, 1.0);
+    if (invert > 0.5) m = 1.0 - m;
+    m = max(m, add.r);
+    m = m * (1.0 - erase.r);
+    m *= opacity;
+    return float4(m, m, m, 1.0);
+}
+
 // ---------------------------------------------------------------------------
 // Effects
 // ---------------------------------------------------------------------------

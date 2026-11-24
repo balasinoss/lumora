@@ -10,6 +10,21 @@ struct PhotoItem: Identifiable, Codable, Equatable, Hashable {
     var isRAW: Bool
     var rating: Int = 0
     var flagged: Bool = false
+    /// Smart-sort results (nil until analysed)
+    var analysis: PhotoAnalysis? = nil
+    /// Albums the user added this photo to by hand
+    var manualAlbums: [String]? = nil
+}
+
+struct PhotoAnalysis: Codable, Equatable, Hashable {
+    var sharpness: Double = 0          // 0...100, subject sharpness
+    var backgroundSharpness: Double = 0
+    var faces: Int = 0
+    var people: Int = 0
+    var largestFace: Double = 0        // face height / image height
+    var armsUp: Bool = false
+    var clipScores: [String: Double] = [:]   // category id -> probability
+    var version: Int = 1
 }
 
 /// Stores photos in Documents/Library/<id>/ (original.<ext>, edits.json, item.json, thumb.jpg).
@@ -18,6 +33,8 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var items: [PhotoItem] = []
     @Published var thumbVersion: [UUID: Int] = [:]
     @Published var importing = false
+    @Published var importTotal = 0
+    @Published var importDone = 0
     @Published var clipboard: EditSettings?
 
     let root: URL = {
@@ -50,10 +67,34 @@ final class LibraryStore: ObservableObject {
         }
     }
 
-    func update(_ item: PhotoItem) {
+    func update(_ item: PhotoItem, backup: Bool = true) {
         saveItem(item)
         if let i = items.firstIndex(where: { $0.id == item.id }) { items[i] = item }
-        CloudSync.shared.backup(item: item, settings: nil, exportJPEG: false)
+        if backup { CloudSync.shared.backup(item: item, settings: nil, exportJPEG: false) }
+    }
+
+    /// Imports many files; quick thumbnails first, then smart sorting in the background.
+    func importBatch(_ urls: [URL], securityScoped: Bool = false) {
+        guard !urls.isEmpty else { return }
+        importing = true
+        importTotal = urls.count
+        importDone = 0
+        var added: [PhotoItem] = []
+        func step(_ i: Int) {
+            guard i < urls.count else {
+                importing = false
+                if SmartSort.shared.autoAnalyze { SmartSort.shared.enqueue(added) }
+                return
+            }
+            let u = urls[i]
+            let ok = securityScoped ? u.startAccessingSecurityScopedResource() : false
+            if let item = importFile(at: u) { added.append(item) }
+            if ok { u.stopAccessingSecurityScopedResource() }
+            importDone = i + 1
+            // yield to the UI between files
+            DispatchQueue.main.async { step(i + 1) }
+        }
+        step(0)
     }
 
     // MARK: Import
@@ -78,7 +119,7 @@ final class LibraryStore: ObservableObject {
         saveSettings(s, for: item)
         items.insert(item, at: 0)
         items.sort { $0.added > $1.added }
-        makeThumbnail(item, settings: s)
+        if settings == nil { makeQuickThumbnail(item) } else { makeThumbnail(item, settings: s) }
         if backup { CloudSync.shared.backup(item: item, settings: s, exportJPEG: false, includeOriginal: true) }
         return item
     }
@@ -120,11 +161,28 @@ final class LibraryStore: ObservableObject {
                   let img = RenderPipeline.shared.renderFull(source: src, settings: settings, maxDimension: 600),
                   let data = RenderPipeline.shared.encode(img, format: .jpeg, quality: 0.8, maxLongEdge: 600, properties: [:]) else { return }
             try? data.write(to: turl, options: .atomic)
-            DispatchQueue.main.async { self.thumbVersion[item.id, default: 0] += 1 }
+            DispatchQueue.main.async { self.thumbCache.removeObject(forKey: item.id as NSUUID); self.thumbVersion[item.id, default: 0] += 1 }
         }
     }
 
-    func thumbnail(_ item: PhotoItem) -> UIImage? { UIImage(contentsOfFile: thumbURL(item).path) }
+    /// Fast thumbnail from the file's embedded preview (used on import).
+    func makeQuickThumbnail(_ item: PhotoItem) {
+        let url = originalURL(item), turl = thumbURL(item)
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let src = PhotoSource(url: url), let cg = src.quickImage(maxPixel: 600),
+                  let data = UIImage(cgImage: cg).jpegData(compressionQuality: 0.8) else { return }
+            try? data.write(to: turl, options: .atomic)
+            DispatchQueue.main.async { self.thumbCache.removeObject(forKey: item.id as NSUUID); self.thumbVersion[item.id, default: 0] += 1 }
+        }
+    }
+
+    private let thumbCache = NSCache<NSUUID, UIImage>()
+    func thumbnail(_ item: PhotoItem) -> UIImage? {
+        if let c = thumbCache.object(forKey: item.id as NSUUID) { return c }
+        guard let img = UIImage(contentsOfFile: thumbURL(item).path) else { return nil }
+        thumbCache.setObject(img, forKey: item.id as NSUUID)
+        return img
+    }
 }
 
 // MARK: - iCloud Drive (or any Files folder) sync

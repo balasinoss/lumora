@@ -1,6 +1,8 @@
 import SwiftUI
+import UIKit
 
-/// Editing slider: label + value, gradient track, drag anywhere, double-tap to reset.
+/// Editing slider: drag horizontally anywhere on the row (vertical drags scroll the panel),
+/// double-tap to reset to its default (0 for most sliders).
 struct LSlider: View {
     let label: String
     @Binding var value: Double
@@ -15,59 +17,119 @@ struct LSlider: View {
     var onCommit: () -> Void = {}
 
     @State private var dragStart: Double?
+    @State private var active = false
 
     private var span: Double { range.upperBound - range.lowerBound }
-    private func frac(_ v: Double) -> CGFloat { CGFloat((v - range.lowerBound) / span) }
+    private func frac(_ v: Double) -> CGFloat { CGFloat((min(max(v, range.lowerBound), range.upperBound) - range.lowerBound) / span) }
+    private var changed: Bool { abs(value - defaultValue) > step / 2 }
 
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 7) {
             HStack {
-                Text(label).font(.system(size: 13)).foregroundStyle(value == defaultValue ? Theme.text2 : .white)
+                Text(label).font(.system(size: 13, weight: changed ? .semibold : .regular))
+                    .foregroundStyle(changed ? .white : Color(white: 0.78))
                 Spacer()
-                Text(format(value)).font(.system(size: 13).monospacedDigit()).foregroundStyle(value == defaultValue ? Theme.text2 : .white)
+                Text(format(value)).font(.system(size: 13, weight: .medium).monospacedDigit())
+                    .foregroundStyle(active ? Theme.accent : (changed ? .white : Theme.text2))
             }
             GeometryReader { geo in
                 let w = geo.size.width
                 ZStack(alignment: .leading) {
                     Capsule()
-                        .fill(gradient.map { AnyShapeStyle(LinearGradient(colors: $0, startPoint: .leading, endPoint: .trailing)) } ?? AnyShapeStyle(Color(white: 0.28)))
-                        .frame(height: gradient == nil ? 3 : 5)
+                        .fill(gradient.map { AnyShapeStyle(LinearGradient(colors: $0, startPoint: .leading, endPoint: .trailing)) } ?? AnyShapeStyle(Color.white.opacity(0.14)))
+                        .frame(height: gradient == nil ? 3 : 4)
                     if gradient == nil {
                         let a = frac(defaultValue), b = frac(value)
-                        Capsule().fill(Color.white.opacity(0.9))
+                        Capsule().fill(Theme.gradient)
                             .frame(width: max(0, abs(b - a) * w), height: 3)
                             .offset(x: min(a, b) * w)
                     }
                     if defaultValue > range.lowerBound && defaultValue < range.upperBound {
-                        Rectangle().fill(Color(white: 0.5)).frame(width: 1, height: 9).offset(x: frac(defaultValue) * w)
+                        Capsule().fill(Color.white.opacity(0.35)).frame(width: 2, height: 8).offset(x: frac(defaultValue) * w - 1)
                     }
-                    Circle().fill(.white).frame(width: 18, height: 18)
-                        .shadow(color: .black.opacity(0.4), radius: 2)
-                        .offset(x: frac(value) * w - 9)
+                    Circle().fill(.white)
+                        .frame(width: active ? 22 : 16, height: active ? 22 : 16)
+                        .shadow(color: .black.opacity(0.5), radius: 3, y: 1)
+                        .offset(x: frac(value) * w - (active ? 11 : 8))
+                        .animation(.easeOut(duration: 0.12), value: active)
                 }
                 .frame(height: 22)
-                .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0)
-                    .onChanged { g in
-                        if dragStart == nil { dragStart = value }
-                        let nv = dragStart! + Double(g.translation.width / w) * span
-                        let stepped = (nv / step).rounded() * step
-                        value = min(max(stepped, range.lowerBound), range.upperBound)
-                    }
-                    .onEnded { _ in dragStart = nil; onCommit() })
-                .onTapGesture(count: 2) { value = defaultValue; onCommit() }
             }
             .frame(height: 22)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 5)
+        .contentShape(Rectangle())
+        .overlay(
+            SliderGestureView(
+                onBegan: { dragStart = value; active = true; UISelectionFeedbackGenerator().selectionChanged() },
+                onChanged: { dx, width in
+                    guard let start = dragStart, width > 0 else { return }
+                    let nv = start + Double(dx / width) * span
+                    let stepped = (nv / step).rounded() * step
+                    let clamped = min(max(stepped, range.lowerBound), range.upperBound)
+                    // gentle detent at the default value
+                    if (value - defaultValue) * (clamped - defaultValue) < 0 { UISelectionFeedbackGenerator().selectionChanged() }
+                    value = clamped
+                },
+                onEnded: { dragStart = nil; active = false; onCommit() },
+                onDoubleTap: {
+                    value = defaultValue
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    onCommit()
+                })
+        )
+    }
+}
+
+/// UIKit gestures so horizontal drags move the slider while vertical drags still scroll.
+struct SliderGestureView: UIViewRepresentable {
+    var onBegan: () -> Void
+    var onChanged: (CGFloat, CGFloat) -> Void
+    var onEnded: () -> Void
+    var onDoubleTap: () -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let v = UIView()
+        v.backgroundColor = .clear
+        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.pan(_:)))
+        pan.delegate = context.coordinator
+        v.addGestureRecognizer(pan)
+        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.doubleTap(_:)))
+        tap.numberOfTapsRequired = 2
+        v.addGestureRecognizer(tap)
+        return v
+    }
+    func updateUIView(_ uiView: UIView, context: Context) { context.coordinator.parent = self }
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var parent: SliderGestureView
+        init(_ p: SliderGestureView) { parent = p }
+
+        @objc func pan(_ g: UIPanGestureRecognizer) {
+            let w = (g.view?.bounds.width ?? 1)
+            switch g.state {
+            case .began: parent.onBegan()
+            case .changed: parent.onChanged(g.translation(in: g.view).x, w)
+            case .ended, .cancelled, .failed: parent.onEnded()
+            default: break
+            }
+        }
+        @objc func doubleTap(_ g: UITapGestureRecognizer) { parent.onDoubleTap() }
+
+        func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+            guard let pan = g as? UIPanGestureRecognizer else { return true }
+            let v = pan.velocity(in: pan.view)
+            return abs(v.x) > abs(v.y)
+        }
     }
 }
 
 struct SectionTitle: View {
     let text: String
     var body: some View {
-        Text(text.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.text2)
-            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+        Text(text.uppercased()).font(.system(size: 11, weight: .bold)).tracking(0.8).foregroundStyle(Theme.text2)
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 14).padding(.bottom, 2)
     }
 }
 
@@ -77,9 +139,10 @@ struct Chip: View {
     var action: () -> Void
     var body: some View {
         Button(action: action) {
-            Text(title).font(.system(size: 13, weight: .medium))
-                .padding(.horizontal, 12).padding(.vertical, 7)
-                .background(selected ? Theme.accent.opacity(0.9) : Theme.panel2, in: Capsule())
+            Text(title).font(.system(size: 13, weight: .semibold))
+                .padding(.horizontal, 13).padding(.vertical, 8)
+                .background(selected ? AnyShapeStyle(Theme.gradient) : AnyShapeStyle(Theme.panel2), in: Capsule())
+                .overlay(Capsule().stroke(Theme.stroke, lineWidth: selected ? 0 : 1))
                 .foregroundStyle(selected ? .black : .white)
         }.buttonStyle(.plain)
     }

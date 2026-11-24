@@ -13,6 +13,29 @@ final class EditorModel: ObservableObject {
     @Published var original: UIImage?
     @Published var histogram: [[Float]] = []
     @Published var cropMode = false { didSet { if cropMode != oldValue { scheduleRender() } } }
+    /// Masking tool active: show the photo in its original frame
+    @Published var maskMode = false { didSet { if maskMode != oldValue { scheduleRender() } } }
+    @Published var selectedMaskID: UUID? { didSet { if selectedMaskID != oldValue { scheduleRender() } } }
+    @Published var showMaskOverlay = true { didSet { scheduleRender() } }
+    @Published var brushMode: BrushMode = .off
+    @Published var brushSize: Double = 0.06
+    @Published var brushFeather: Double = 0.5
+    @Published var brushFlow: Double = 1.0
+    @Published var maskBusy: String?
+    @Published var maskError: String?
+    @Published var peopleCount: Int?
+    /// Light → Curve: edit the curve directly on the photo
+    @Published var curveEditing = false
+    @Published var curveChannel: CurveChannel = .master
+    /// Detail → Masking preview
+    @Published var showSharpenMask = false { didSet { if showSharpenMask != oldValue { scheduleRender() } } }
+    /// AI Denoise
+    @Published var denoiseProgress: Double?
+    @Published var denoiseApplied: Double?
+    @Published var denoiseError: String?
+
+    enum BrushMode { case off, add, erase }
+    var itemDir: URL { LibraryStore.shared.dir(item) }
     @Published var canUndo = false
     @Published var canRedo = false
     @Published var matchedLens: LensProfile?
@@ -33,6 +56,7 @@ final class EditorModel: ObservableObject {
         settings = s
         committed = s
         source = PhotoSource(url: LibraryStore.shared.originalURL(item))
+        denoiseApplied = AIDenoise.appliedAmount(LibraryStore.shared.dir(item))
         scheduleRender()
         findLens()
     }
@@ -78,10 +102,12 @@ final class EditorModel: ObservableObject {
         if rendering { pending = true; return }
         rendering = true
         let s = settings
-        let crop = cropMode
+        let mode: RenderMode = cropMode ? .crop : (maskMode ? .mask : .normal)
+        let overlay = (maskMode && showMaskOverlay) ? selectedMaskID : nil
+        let sharpenMask = showSharpenMask
         queue.async { [weak self] in
             guard let self else { return }
-            let out = self.render(s, uncropped: crop)
+            let out = self.render(s, mode: mode, overlay: overlay, sharpenMask: sharpenMask)
             DispatchQueue.main.async {
                 if let out {
                     self.preview = out.0
@@ -93,11 +119,20 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    private func render(_ s: EditSettings, uncropped: Bool) -> (UIImage, [[Float]])? {
+    enum RenderMode { case normal, crop, mask }
+
+    private func render(_ s: EditSettings, mode: RenderMode, overlay: UUID?, sharpenMask: Bool) -> (UIImage, [[Float]])? {
         guard let source, let base = source.previewBase(settings: s, context: pipeline.context) else { return nil }
         let full = min(source.fullSize.width, source.fullSize.height)
-        let info = RenderPipeline.info(for: source, settings: s, pixelScale: min(base.extent.width, base.extent.height) / max(full, 1))
-        let img = uncropped ? pipeline.processUncropped(base, settings: s, info: info) : pipeline.process(base, settings: s, info: info)
+        var info = RenderPipeline.info(for: source, settings: s, pixelScale: min(base.extent.width, base.extent.height) / max(full, 1))
+        info.overlayMask = overlay
+        info.sharpenMaskPreview = sharpenMask
+        let img: CIImage
+        switch mode {
+        case .crop: img = pipeline.processUncropped(base, settings: s, info: info)
+        case .mask: img = pipeline.processUnframed(base, settings: s, info: info)
+        case .normal: img = pipeline.process(base, settings: s, info: info)
+        }
         guard let cg = pipeline.cgImage(img) else { return nil }
         return (UIImage(cgImage: cg), pipeline.histogram(img))
     }
@@ -144,6 +179,115 @@ final class EditorModel: ObservableObject {
             $0.contrast = 10; $0.highlights = -35; $0.shadows = 30
             $0.whites = 8; $0.blacks = -8; $0.vibrance = 12; $0.saturation = 3
         }
+    }
+
+    // MARK: Masks
+
+    var selectedMask: MaskLayer? {
+        get { settings.masks.first { $0.id == selectedMaskID } }
+    }
+    func updateMask(_ change: (inout MaskLayer) -> Void) {
+        guard let i = settings.masks.firstIndex(where: { $0.id == selectedMaskID }) else { return }
+        var m = settings.masks[i]
+        change(&m)
+        settings.masks[i] = m
+    }
+    func maskBinding(_ kp: WritableKeyPath<LocalAdjust, Double>) -> Binding<Double> {
+        Binding(get: { self.selectedMask?.adjust[keyPath: kp] ?? 0 },
+                set: { v in self.updateMask { $0.adjust[keyPath: kp] = v } })
+    }
+
+    func addMask(_ kind: MaskKind, personIndex: Int = 0) {
+        let name = kind == .person ? "Person \(personIndex + 1)" : kind.title
+        let layer = MaskLayer(kind: kind, name: name, personIndex: personIndex)
+        func insert() {
+            edit { $0.masks.append(layer) }
+            selectedMaskID = layer.id
+            brushMode = kind == .brush ? .add : .off
+        }
+        guard kind.isAI, let source else { insert(); return }
+        if MaskEngine.shared.hasMask(itemDir, kind: kind, personIndex: personIndex) { insert(); return }
+        maskBusy = "Finding \(name.lowercased())…"
+        maskError = nil
+        let dir = itemDir
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try MaskEngine.shared.generate(kind: kind, personIndex: personIndex, source: source, itemDir: dir)
+                DispatchQueue.main.async { self.maskBusy = nil; insert() }
+            } catch {
+                DispatchQueue.main.async { self.maskBusy = nil; self.maskError = error.localizedDescription }
+            }
+        }
+    }
+
+    func detectPeople() {
+        guard peopleCount == nil, let source else { return }
+        let dir = itemDir
+        DispatchQueue.global(qos: .userInitiated).async {
+            let n = MaskEngine.shared.detectPeople(source: source, itemDir: dir)
+            DispatchQueue.main.async { self.peopleCount = n }
+        }
+    }
+
+    func deleteMask(_ id: UUID) {
+        edit { $0.masks.removeAll { $0.id == id } }
+        if selectedMaskID == id { selectedMaskID = nil }
+    }
+
+    func duplicateMask(_ id: UUID, invert: Bool) {
+        guard var m = settings.masks.first(where: { $0.id == id }) else { return }
+        m.id = UUID()
+        m.name += invert ? " (inverted)" : " copy"
+        if invert { m.invert.toggle() }
+        edit { $0.masks.append(m) }
+        selectedMaskID = m.id
+    }
+
+    /// Brush painting (normalised image coordinates)
+    func beginStroke(at p: NPoint) {
+        guard brushMode != .off else { return }
+        let stroke = BrushStroke(points: [p], size: brushSize, feather: brushFeather, flow: brushFlow, erase: brushMode == .erase)
+        updateMask { $0.strokes.append(stroke) }
+    }
+    func continueStroke(to p: NPoint) {
+        updateMask { m in
+            guard var last = m.strokes.popLast() else { return }
+            if let q = last.points.last, hypot(q.x - p.x, q.y - p.y) < 0.004 { m.strokes.append(last); return }
+            last.points.append(p)
+            m.strokes.append(last)
+        }
+    }
+
+    // MARK: AI Denoise
+
+    func runDenoise(amount: Double) {
+        guard let source, denoiseProgress == nil else { return }
+        denoiseProgress = 0
+        denoiseError = nil
+        let s = settings, dir = itemDir
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try AIDenoise.run(source: source, settings: s, itemDir: dir, amount: amount) { p in
+                    DispatchQueue.main.async { self.denoiseProgress = p }
+                }
+                source.clearCache()
+                DispatchQueue.main.async {
+                    self.denoiseProgress = nil
+                    self.denoiseApplied = amount
+                    self.edit { $0.aiDenoise = true; $0.aiDenoiseAmount = amount; $0.noiseReduction = 0; $0.colorNoiseReduction = 0 }
+                    self.scheduleRender()
+                }
+            } catch {
+                DispatchQueue.main.async { self.denoiseProgress = nil; self.denoiseError = error.localizedDescription }
+            }
+        }
+    }
+
+    func removeDenoise() {
+        AIDenoise.remove(itemDir)
+        source?.clearCache()
+        denoiseApplied = nil
+        edit { $0.aiDenoise = false }
     }
 
     // MARK: Saving

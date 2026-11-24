@@ -4,6 +4,9 @@ import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @EnvironmentObject var cloud: CloudSync
+    @EnvironmentObject var smart: SmartSort
+    @State private var newName = ""
+    @State private var newPrompt = ""
     @Environment(\.dismiss) var dismiss
     @State private var pickFolder = false
 
@@ -35,18 +38,75 @@ struct SettingsView: View {
                         Slider(value: $cloud.exportQuality, in: 0.6...1.0, step: 0.01)
                     }
                 }
+                Section {
+                    Toggle("Sort new photos automatically", isOn: $smart.autoAnalyze).tint(Theme.accent)
+                    threshold("In Focus — minimum sharpness", $smart.focusThreshold)
+                    threshold("Sharpest — minimum sharpness", $smart.sharpThreshold)
+                    threshold("Blurry — below", $smart.blurThreshold)
+                    VStack(alignment: .leading) {
+                        Text("AI album confidence: \(smart.strictness < 0.34 ? "Relaxed" : smart.strictness < 0.67 ? "Balanced" : "Strict")")
+                        Slider(value: $smart.strictness, in: 0...1).tint(Theme.accent)
+                    }
+                    Button("Re-analyze all photos") { smart.enqueue(LibraryStore.shared.items, force: true) }
+                } header: { Text("Smart Albums") } footer: {
+                    Text("Sharpness is measured on the main subject (0–100). Tip: sort the library by sharpness to see the numbers for your camera, then tune these. A photo can be in several albums at once — nothing is copied.")
+                }
+                Section("Albums") {
+                    ForEach($smart.categories) { $c in
+                        HStack {
+                            Image(systemName: c.icon).frame(width: 24).foregroundStyle(Theme.accent)
+                            VStack(alignment: .leading) {
+                                Text(c.name)
+                                if !c.isMetric && !c.builtIn {
+                                    Text(c.prompts.joined(separator: " · ")).font(.caption).foregroundStyle(Theme.text2).lineLimit(1)
+                                }
+                            }
+                            Spacer()
+                            Toggle("", isOn: $c.enabled).labelsHidden().tint(Theme.accent)
+                        }
+                    }
+                    .onDelete { idx in
+                        let removable = idx.filter { !smart.categories[$0].builtIn }
+                        smart.categories.remove(atOffsets: IndexSet(removable))
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Add your own album").font(.subheadline.bold())
+                        TextField("Name (e.g. Free Throws)", text: $newName)
+                        TextField("Describe the photos (e.g. a player shooting a free throw)", text: $newPrompt, axis: .vertical)
+                        Button("Add Album") {
+                            let id = "custom-" + UUID().uuidString.prefix(8)
+                            smart.categories.append(SmartCategory(id: String(id), name: newName, icon: "sparkles",
+                                                                  prompts: [newPrompt], builtIn: false))
+                            newName = ""; newPrompt = ""
+                            smart.rescoreAll()
+                        }
+                        .disabled(newName.isEmpty || newPrompt.count < 4)
+                    }
+                    .padding(.vertical, 4)
+                }
                 Section("About") {
                     LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")
-                    Text("Lens profiles come from the Lensfun database (lensfun.github.io), licensed CC BY-SA 3.0.")
+                    Text("Lens profiles: Lensfun database (CC BY-SA 3.0). AI Denoise: DRUNet (KAIR, MIT). Sky masks: SegFormer (NVIDIA). Smart albums: MobileCLIP (Apple). Subject & people masks: Apple Vision.")
                         .font(.footnote).foregroundStyle(Theme.text2)
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(Theme.bg)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .sheet(isPresented: $pickFolder) {
                 FolderPicker { url in cloud.setFolder(url) }.ignoresSafeArea()
             }
+        }
+    }
+}
+
+extension SettingsView {
+    func threshold(_ title: String, _ v: Binding<Double>) -> some View {
+        VStack(alignment: .leading) {
+            Text("\(title): \(Int(v.wrappedValue))")
+            Slider(value: v, in: 0...100, step: 1).tint(Theme.accent)
         }
     }
 }

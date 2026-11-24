@@ -72,17 +72,54 @@ final class PhotoSource {
 
     // MARK: Base image
 
+    var denoisedURL: URL { AIDenoise.outputURL(url.deletingLastPathComponent()) }
+    var hasDenoised: Bool { FileManager.default.fileExists(atPath: denoisedURL.path) }
+
     private func rawKey(_ s: EditSettings) -> String {
-        guard isRAW else { return "std" }
+        var dn = ""
+        if s.aiDenoise && hasDenoised {
+            let attrs = try? FileManager.default.attributesOfItem(atPath: denoisedURL.path)
+            let date = attrs?[.modificationDate] as? Date
+            dn = "dn\(date?.timeIntervalSince1970 ?? 0)"
+        }
+        guard isRAW else { return "std" + dn }
+        if !dn.isEmpty { return "raw\(s.temperature ?? -1)|\(s.tint)|\(s.whiteBalance)" + dn }
         return "\(s.temperature ?? -1)|\(s.tint)|\(s.whiteBalance)|\(s.noiseReduction)|\(s.colorNoiseReduction)"
+    }
+
+    func clearCache() {
+        lock.lock(); previewCache = nil; lock.unlock()
+    }
+
+    /// Fast, small preview straight from the file (uses the embedded JPEG for RAW files).
+    func quickImage(maxPixel: Int) -> CGImage? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                     kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+                                     kCGImageSourceCreateThumbnailWithTransform: true]
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
     }
 
     /// Builds the base image (linear, oriented, origin at 0,0).
     /// maxDimension = nil for full resolution.
-    func makeBase(settings s: EditSettings, maxDimension: CGFloat?) -> CIImage? {
+    func makeBase(settings s: EditSettings, maxDimension: CGFloat?, allowDenoised: Bool = true) -> CIImage? {
         var img: CIImage?
         let scale: CGFloat = maxDimension.map { min(1, $0 / max(fullSize.width, fullSize.height)) } ?? 1
-        if isRAW, let f = CIRAWFilter(imageURL: url) {
+        if allowDenoised && s.aiDenoise && hasDenoised, var d = CIImage(contentsOf: denoisedURL) {
+            if scale < 1 {
+                d = d.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1])
+            }
+            if isRAW {
+                // denoised file has as-shot white balance baked in; apply the difference
+                let (t, ti) = rawWhiteBalance(s)
+                if abs(t - asShotTemperature) > 1 || abs(ti - asShotTint) > 0.5 {
+                    d = d.applyingFilter("CITemperatureAndTint", parameters: [
+                        "inputNeutral": CIVector(x: CGFloat(t), y: CGFloat(ti)),
+                        "inputTargetNeutral": CIVector(x: CGFloat(asShotTemperature), y: CGFloat(asShotTint))])
+                }
+            }
+            img = d
+        } else if isRAW, let f = CIRAWFilter(imageURL: url) {
             f.scaleFactor = Float(scale)
             let (t, ti) = rawWhiteBalance(s)
             f.neutralTemperature = Float(t)

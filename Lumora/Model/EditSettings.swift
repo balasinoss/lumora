@@ -120,6 +120,11 @@ struct EditSettings: Codable, Equatable {
     var offsetX: Double = 0
     var offsetY: Double = 0
 
+    // MARK: AI
+    var aiDenoise: Bool = false
+    var aiDenoiseAmount: Double = 50
+    var masks: [MaskLayer] = []
+
     // MARK: Crop
     var crop: NormRect = .full
     var cropAspect: String = "Original"
