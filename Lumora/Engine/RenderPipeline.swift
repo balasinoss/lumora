@@ -296,7 +296,7 @@ final class RenderPipeline {
         if s.straighten != 0 {
             let a = CGFloat(s.straighten * .pi / 180)
             let w = E.width, h = E.height
-            let fill = max((w * abs(cos(a)) + h * abs(sin(a))) / w, (w * abs(sin(a)) + h * abs(cos(a))) / h)
+            let fill = straightenFillScale(width: w, height: h, degrees: s.straighten)
             let t = CGAffineTransform(translationX: -E.midX, y: -E.midY)
                 .concatenating(CGAffineTransform(scaleX: fill, y: fill))
                 .concatenating(CGAffineTransform(rotationAngle: -a))
@@ -408,4 +408,14 @@ enum Curves {
         }
         return f.withUnsafeBufferPointer { Data(buffer: $0) }
     }
+}
+
+/// Scale needed so a rotated image still fills its original frame.
+func straightenFillScale(width w: CGFloat, height h: CGFloat, degrees: Double) -> CGFloat {
+    let a: CGFloat = CGFloat(abs(degrees) * Double.pi / 180)
+    let c: CGFloat = cos(a)
+    let sn: CGFloat = sin(a)
+    let sx: CGFloat = (w * c + h * sn) / w
+    let sy: CGFloat = (w * sn + h * c) / h
+    return max(sx, sy)
 }

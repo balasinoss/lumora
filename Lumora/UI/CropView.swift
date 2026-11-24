@@ -99,8 +99,7 @@ struct CropOverlay: View {
     }
 
     func straightenFill(_ s: CGSize) -> CGFloat {
-        let a = abs(model.settings.straighten) * .pi / 180
-        return max((s.width * cos(a) + s.height * sin(a)) / s.width, (s.width * sin(a) + s.height * cos(a)) / s.height)
+        straightenFillScale(width: s.width, height: s.height, degrees: model.settings.straighten)
     }
 
     func moveGesture(_ f: CGRect) -> some Gesture {
