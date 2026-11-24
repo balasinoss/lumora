@@ -17,7 +17,7 @@ struct ExportSheet: View {
     @State private var logoItem: PhotosPickerItem?
 
     var maxEdge: CGFloat? { layout.frame != .original ? nil : [nil, 4096, 2048, 1080][size] }
-    var maxUpscale: Int { model.source.map { Upscaler.maxFactor(for: $0.fullSize) } ?? 1 }
+    var maxUpscale: Int { model.source.map { AIUpscaler.maxFactor(for: $0.fullSize) } ?? 1 }
 
     var body: some View {
         NavigationStack {

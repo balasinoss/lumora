@@ -543,7 +543,7 @@ final class EditorModel: ObservableObject {
                 DispatchQueue.main.async { completion(nil) }; return
             }
             if upscale > 1 {
-                if let up = try? Upscaler.upscale(img, factor: upscale, progress: { p in DispatchQueue.main.async { self.exportProgress = p } }) {
+                if let up = try? AIUpscaler.upscale(img, factor: upscale, progress: { p in DispatchQueue.main.async { self.exportProgress = p } }) {
                     img = up
                 }
                 DispatchQueue.main.async { self.exportProgress = nil }

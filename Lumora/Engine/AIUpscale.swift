@@ -3,7 +3,7 @@ import CoreML
 import UIKit
 
 /// AI upscaling (Real-ESRGAN general x4v3) in 256-px tiles. Output is 2× or 4×.
-enum Upscaler {
+enum AIUpscaler {
     static let tile = 256
     static let overlap = 12
     /// Largest output we allow (megapixels) so the iPhone doesn't run out of memory.
