@@ -51,8 +51,9 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tee build.log | grep -E "error:|warning: unre|BUILD" || true
-          test -d build/Build/Products/Release-iphoneos/Lumora.app
+            build > build.log 2>&1 || true
+          grep -E "error:|BUILD" build.log | head -50 || true
+          test -f build/Build/Products/Release-iphoneos/Lumora.app/Lumora
 
       - name: Report build errors as an issue
         if: failure()
