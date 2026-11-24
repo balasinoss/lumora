@@ -1,0 +1,95 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app || sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+
+      - name: Fetch Lensfun lens database (CC BY-SA 3.0)
+        run: |
+          git clone --depth 1 https://github.com/lensfun/lensfun.git /tmp/lensfun
+          mkdir -p Lumora/Resources/LensfunDB
+          cp /tmp/lensfun/data/db/*.xml Lumora/Resources/LensfunDB/
+          ls Lumora/Resources/LensfunDB | wc -l
+
+      - name: Generate app icon
+        run: python3 scripts/make_icon.py Lumora/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build
+        id: build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Lumora.xcodeproj \
+            -scheme Lumora \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log | grep -E "error:|warning: unre|BUILD" || true
+          test -d build/Build/Products/Release-iphoneos/Lumora.app
+
+      - name: Report build errors as an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Commit: ${GITHUB_SHA}"
+            echo '```'
+            grep -E "error:|fatal error|Undefined symbol|ld:" build.log | sort -u | head -150 || true
+            echo '```'
+            echo '<details><summary>Log tail</summary>'
+            echo ''
+            echo '```'
+            tail -80 build.log || true
+            echo '```'
+            echo '</details>'
+          } > errors.md
+          gh issue create --title "Build failed: ${GITHUB_SHA::7}" --body-file errors.md --label "" || gh issue create --title "Build failed: ${GITHUB_SHA::7}" --body-file errors.md
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/Lumora.app Payload/
+          zip -qry Lumora.ipa Payload
+          ls -lh Lumora.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Lumora-ipa
+          path: Lumora.ipa
+
+      - name: Publish release "latest"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest -y --cleanup-tag || true
+          gh release create latest Lumora.ipa \
+            --title "Lumora (latest build)" \
+            --notes "Built from ${GITHUB_SHA::7}. Download Lumora.ipa and install it with Sideloadly."

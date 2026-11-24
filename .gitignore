@@ -1,0 +1,7 @@
+*.xcodeproj/
+build/
+Payload/
+*.ipa
+Lumora/Resources/LensfunDB/*.xml
+Lumora/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+.DS_Store
